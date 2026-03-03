@@ -1,0 +1,1 @@
+[27-Oct-2025 22:52:03 Europe/Berlin] PHP Warning:  Undefined variable $zuruDB in C:\xampp\htdocs\zurubank\Frontend\dashboard\test.php on line 29

@@ -1,0 +1,32 @@
+/* * This file contains the styles to match the index.html page.
+ * All styles are based on Tailwind CSS utility classes.
+ */
+
+/* Global */
+body {
+    @apply font-inter bg-gray-100 text-gray-800;
+}
+
+/* Links */
+a {
+    @apply text-gray-900;
+}
+
+/* Header (if not using the Tailwind-based one) */
+header {
+    @apply bg-gray-900 text-white p-5 text-center text-4xl font-extrabold;
+}
+
+/* Buttons */
+button, .btn {
+    @apply bg-gray-900 text-white border border-gray-900 px-6 py-3 font-bold cursor-pointer transition-colors duration-200;
+}
+
+button:hover, .btn:hover {
+    @apply bg-gray-800;
+}
+
+/* Forms */
+form {
+    @apply bg-white p-8;
+}

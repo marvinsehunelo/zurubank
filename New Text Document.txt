@@ -1,0 +1,46 @@
+zuru_bank/
+├── backend/
+│   ├── config/
+│   │   └── db.php                # Database connection
+│   ├── controllers/
+│   │   ├── auth.php              # Login, register, logout
+│   │   ├── accounts.php          # Account management (create, view)
+│   │   ├── transactions.php      # Deposit, withdrawal, transfer
+│   │   └── users.php             # Admin/user management
+│   ├── models/
+│   │   ├── User.php
+│   │   ├── Account.php
+│   │   └── Transaction.php
+│   ├── api/
+│   │   └── endpoints.php         # REST API for mobile apps
+│   └── utils/
+│       ├── helpers.php           # Common helper functions
+│       └── security.php          # Password hashing, auth checks
+├── frontend/
+│   ├── css/
+│   │   └── styles.css
+│   ├── js/
+│   │   └── scripts.js
+│   ├── images/
+│   │   └── logo.png
+│   ├── auth/
+│   │   ├── login.php
+│   │   └── register.php
+│   ├── dashboard/
+│   │   ├── user_dashboard.php
+│   │   └── admin_dashboard.php
+│   └── transactions/
+│       ├── deposit.php
+│       ├── withdraw.php
+│       └── transfer.php
+├── database/
+│   └── zuru_bank.sql             # SQL dump for creating all tables
+├── vendor/                        # Optional (if using Composer)
+├── index.php                      # Landing page
+└── README.md                      # Setup instructions
+
+my zurubank folder contains Backend folder (contains api folder (endpoints.php, ewallet.php), 
+config folder (db.php, jwt.php), controllers folder (accounts.php, admin.php, auth.php, ewallet.php, transactions.php), 
+model folder(ewallet.php)), Database folder (sql file), Frontend folder (auth folder (login.php, register.php), 
+css folder, dashboard folder (admin_dashaborad.php, user_dashboard.php), ewallet folder (dashboard.php), images folder, js folder (script.js), 
+transactions folder (deposit.php, transfer.php, withdraw.php), index.php), vendor folder 

@@ -1,0 +1,4 @@
+=== Status Truncate Test ===
+ERROR in transactions: SQLSTATE[42S22]: Column not found: 1054 Unknown column 'from_account' in 'field list'
+ERROR in swap_ledgers: SQLSTATE[42S02]: Base table or view not found: 1146 Table 'zurubank.swap_ledgers' doesn't exist
+ERROR in instant_money_vouchers: SQLSTATE[23000]: Integrity constraint violation: 1452 Cannot add or update a child row: a foreign key constraint fails (`zurubank`.`instant_money_vouchers`, CONSTRAINT `instant_money_vouchers_ibfk_1` FOREIGN KEY (`created_by`) REFERENCES `users` (`user_id`))

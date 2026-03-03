@@ -1,0 +1,67 @@
+2025-11-14 09:58:37 | ERROR: SQLSTATE[01000]: Warning: 1265 Data truncated for column 'type' at row 1
+2025-11-14 09:59:12 | ERROR: SQLSTATE[01000]: Warning: 1265 Data truncated for column 'type' at row 1
+2025-11-15 08:20:34 | ERROR: SQLSTATE[23000]: Integrity constraint violation: 1452 Cannot add or update a child row: a foreign key constraint fails (`zurubank`.`transactions`, CONSTRAINT `transactions_ibfk_1` FOREIGN KEY (`account_id`) REFERENCES `accounts` (`account_id`) ON DELETE CASCADE)
+2025-11-15 08:27:31 | ERROR: SQLSTATE[23000]: Integrity constraint violation: 1452 Cannot add or update a child row: a foreign key constraint fails (`zurubank`.`transactions`, CONSTRAINT `transactions_ibfk_1` FOREIGN KEY (`account_id`) REFERENCES `accounts` (`account_id`) ON DELETE CASCADE)
+2025-11-15 08:33:52 | ERROR: SQLSTATE[23000]: Integrity constraint violation: 1452 Cannot add or update a child row: a foreign key constraint fails (`zurubank`.`transactions`, CONSTRAINT `transactions_ibfk_1` FOREIGN KEY (`account_id`) REFERENCES `accounts` (`account_id`) ON DELETE CASCADE)
+2025-11-15 08:36:33 | ERROR: SQLSTATE[23000]: Integrity constraint violation: 1452 Cannot add or update a child row: a foreign key constraint fails (`zurubank`.`transactions`, CONSTRAINT `transactions_ibfk_1` FOREIGN KEY (`account_id`) REFERENCES `accounts` (`account_id`) ON DELETE CASCADE)
+2025-11-15 08:40:06 | ERROR: SQLSTATE[23000]: Integrity constraint violation: 1452 Cannot add or update a child row: a foreign key constraint fails (`zurubank`.`transactions`, CONSTRAINT `transactions_ibfk_1` FOREIGN KEY (`account_id`) REFERENCES `accounts` (`account_id`) ON DELETE CASCADE)
+2025-11-15 08:45:29 | ERROR: SQLSTATE[23000]: Integrity constraint violation: 1452 Cannot add or update a child row: a foreign key constraint fails (`zurubank`.`transactions`, CONSTRAINT `transactions_ibfk_1` FOREIGN KEY (`account_id`) REFERENCES `accounts` (`account_id`) ON DELETE CASCADE)
+2025-11-15 16:36:25 | ERROR: Voucher already redeemed or inactive
+2025-11-15 18:33:02 | ERROR: Voucher already redeemed or inactive
+2025-11-15 18:55:58 | ERROR: Voucher already redeemed or inactive
+2025-11-15 19:02:41 | ERROR: Voucher already redeemed or inactive
+2025-11-15 19:19:23 | ERROR: Voucher already redeemed or inactive
+2025-11-16 09:20:45 | ERROR: Voucher already redeemed or inactive
+2025-11-16 09:40:19 | ERROR: Voucher already redeemed or inactive
+2025-11-16 09:45:42 | ERROR: Voucher already redeemed or inactive
+2025-11-16 09:49:47 | ERROR: Voucher already redeemed or inactive
+2025-11-16 10:38:59 | ERROR: Voucher already redeemed or inactive
+2025-11-16 10:44:12 | ERROR: Voucher already redeemed or inactive
+2025-11-16 10:49:37 | ERROR: Voucher already redeemed or inactive
+2025-11-16 18:31:47 | ERROR: Voucher already redeemed or inactive
+2025-11-16 19:15:52 | ERROR: Voucher already redeemed or inactive
+2025-11-16 19:31:29 | ERROR: Voucher already redeemed or inactive
+2025-11-16 19:50:51 | ERROR: Voucher already redeemed or inactive
+2025-11-16 20:40:23 | ERROR: Voucher already redeemed or inactive
+2025-11-20 19:34:59 | ERROR: Voucher already redeemed or inactive
+2025-11-20 20:46:27 | ERROR: Voucher already redeemed or inactive
+2025-11-20 20:46:27 | ERROR: Voucher already redeemed or inactive
+2025-11-20 21:56:59 | ERROR: Voucher already redeemed or inactive
+2025-11-20 21:57:41 | ERROR: Voucher already redeemed or inactive
+2025-11-20 21:57:41 | ERROR: Voucher already redeemed or inactive
+2025-11-20 22:52:20 | ERROR: Voucher already redeemed or inactive
+2025-11-20 22:56:25 | ERROR: Voucher already redeemed or inactive
+2025-11-20 23:03:44 | ERROR: Voucher already redeemed or inactive
+2025-11-20 23:29:39 | ERROR: Voucher already redeemed or inactive
+2025-11-20 23:44:43 | ERROR: Voucher already redeemed or inactive
+2025-11-20 23:55:05 | ERROR: Voucher already redeemed or inactive
+2025-11-21 00:00:49 | ERROR: Voucher already redeemed or inactive
+2025-11-21 00:00:49 | ERROR: Voucher already redeemed or inactive
+2025-11-21 06:48:40 | ERROR: Voucher already redeemed or inactive
+2025-11-21 07:01:26 | ERROR: Voucher already redeemed or inactive
+2025-11-21 07:03:33 | ERROR: Voucher already redeemed or inactive
+2025-11-21 07:06:15 | ERROR: Voucher already redeemed or inactive
+2025-11-21 07:12:33 | ERROR: Voucher already redeemed or inactive
+2025-11-21 08:08:38 | ERROR: Voucher already redeemed or inactive
+2025-11-21 09:15:51 | ERROR: Voucher already redeemed or inactive
+2025-11-21 09:26:10 | ERROR: Voucher already redeemed or inactive
+2025-11-21 09:29:01 | ERROR: Voucher already redeemed or inactive
+2025-11-21 09:40:29 | ERROR: Voucher already redeemed or inactive
+2025-11-21 09:54:01 | ERROR: Voucher already redeemed or inactive
+2025-11-21 10:22:04 | ERROR: Voucher already redeemed or inactive
+2025-11-21 10:26:37 | ERROR: Voucher already redeemed or inactive
+2025-11-21 10:31:43 | ERROR: Voucher already redeemed or inactive
+2025-11-21 10:37:52 | ERROR: Voucher already redeemed or inactive
+2025-11-21 10:46:46 | ERROR: Voucher already redeemed or inactive
+2025-11-21 10:51:58 | ERROR: Voucher already redeemed or inactive
+2025-11-21 10:55:51 | ERROR: Voucher already redeemed or inactive
+2025-11-21 11:01:07 | ERROR: Voucher already redeemed or inactive
+2025-11-21 19:05:44 | ERROR: Voucher already redeemed or inactive
+2025-11-22 08:07:36 | ERROR: Voucher already redeemed or inactive
+2026-01-03 00:40:47 | ERROR: Voucher already redeemed or inactive
+2026-02-05 15:03:50 | ERROR: Voucher already redeemed or inactive
+2026-02-05 15:06:28 | ERROR: Voucher not found or PIN incorrect
+2026-02-07 05:52:18 | ERROR: Voucher not found or PIN incorrect
+2026-02-12 10:55:18 | ERROR: Bank settlement account not found
+2026-02-12 11:51:33 | ERROR: SQLSTATE[HY093]: Invalid parameter number: parameter was not defined
+2026-02-12 16:20:49 | ERROR: Voucher not found or PIN incorrect
