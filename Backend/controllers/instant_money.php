@@ -77,7 +77,7 @@ try {
             $stmt = $pdo->prepare("
                 INSERT INTO instant_money_vouchers
                 (voucher_number, voucher_pin, amount, currency, status, created_by, recipient_phone, redeemed_by, 
-                 voucher_created_at, voucher_expires_at, swap_enabled, swap_made_at, swap_expires_at, swap_fee_paid_by)
+                 voucher_created_at, voucher_expires_at, sat_purchased, swap_made_at, sat_expires_at, sat_fee_paid_by)
                 VALUES (?, ?, ?, ?, 'active', ?, ?, NULL, NOW(), NOW() + INTERVAL '7 days', TRUE, NOW(), NOW() + INTERVAL '1 day', 'sender')
             ");
             $stmt->execute([$voucher_number, $voucher_pin, $amount, $currency, $user_id, $recipient_phone]);
@@ -134,7 +134,7 @@ try {
         case 'list_vouchers':
             $stmt = $pdo->prepare("
                 SELECT voucher_id, voucher_number, voucher_pin, amount, currency, status, created_by, recipient_phone,
-                       redeemed_by, voucher_created_at, voucher_expires_at, swap_enabled, swap_fee_paid_by, swap_expires_at
+                       redeemed_by, voucher_created_at, voucher_expires_at, sat_purchased, sat_fee_paid_by, swap_expires_at
                 FROM instant_money_vouchers
                 WHERE created_by=?
                 ORDER BY voucher_created_at DESC
@@ -193,4 +193,5 @@ try {
     error_log("Voucher API Error: " . $e->getMessage() . " on line " . $e->getLine());
     jsonResponse(false, "Transaction failed: " . $e->getMessage());
 }
+
 
