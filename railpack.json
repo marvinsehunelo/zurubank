@@ -1,8 +1,19 @@
 {
-  "build": {
-    "builder": "NIXPACKS",
-    "nixpacks": {
-      "phpextensions": ["pdo_pgsql", "pgsql"]
-    }
+  "$schema": "https://schema.railpack.com",
+  "provider": "php",
+  "php": {
+    "version": "8.4",
+    "extensions": [
+      "pdo_pgsql",
+      "pgsql",
+      "gd",
+      "mbstring",
+      "xml",
+      "json",
+      "session"
+    ]
+  },
+  "deploy": {
+    "startCommand": "php -S 0.0.0.0:${PORT:-8080} -t ."
   }
 }
