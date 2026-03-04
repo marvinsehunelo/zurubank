@@ -5,12 +5,7 @@
     "version": "8.4",
     "extensions": [
       "pdo_pgsql",
-      "pgsql",
-      "gd",
-      "mbstring",
-      "xml",
-      "json",
-      "session"
+      "pgsql"
     ]
   },
   "deploy": {
