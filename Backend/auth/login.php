@@ -32,7 +32,7 @@ try {
     }
 
     // Verify password
-    if (!password_verify($password, $user['password'])) {
+    if (!password_verify($password, $user['password_hash'])) {
         echo json_encode(["status" => "error", "message" => "Invalid password"]);
         exit;
     }
@@ -68,3 +68,4 @@ try {
         "debug" => "Exception: " . $e->getMessage()
     ]);
 }
+
