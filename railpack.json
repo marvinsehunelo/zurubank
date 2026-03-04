@@ -1,0 +1,8 @@
+{
+  "build": {
+    "builder": "NIXPACKS",
+    "nixpacks": {
+      "phpextensions": ["pdo_pgsql", "pgsql"]
+    }
+  }
+}
