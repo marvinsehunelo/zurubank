@@ -532,3 +532,14 @@ ADD COLUMN IF NOT EXISTS source_institution VARCHAR(100);
 
 ALTER TABLE instant_money_vouchers
 ADD COLUMN IF NOT EXISTS source_hold_reference VARCHAR(255);
+
+-- Add missing reference column to instant_money_vouchers
+ALTER TABLE instant_money_vouchers 
+ADD COLUMN IF NOT EXISTS reference VARCHAR(255);
+
+-- Also ensure all other columns that might be missing
+ALTER TABLE instant_money_vouchers 
+ADD COLUMN IF NOT EXISTS source_institution VARCHAR(100),
+ADD COLUMN IF NOT EXISTS source_hold_reference VARCHAR(255),
+ADD COLUMN IF NOT EXISTS source_asset_type VARCHAR(50),
+ADD COLUMN IF NOT EXISTS code_hash VARCHAR(255);
