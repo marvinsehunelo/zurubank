@@ -543,4 +543,37 @@ ADD COLUMN IF NOT EXISTS source_institution VARCHAR(100),
 ADD COLUMN IF NOT EXISTS source_hold_reference VARCHAR(255),
 ADD COLUMN IF NOT EXISTS source_asset_type VARCHAR(50),
 ADD COLUMN IF NOT EXISTS code_hash VARCHAR(255);
+-- =========================================================
+-- FIX 1: Add missing columns to instant_money_vouchers
+-- =========================================================
+ALTER TABLE instant_money_vouchers 
+ADD COLUMN IF NOT EXISTS reference VARCHAR(255),
+ADD COLUMN IF NOT EXISTS source_institution VARCHAR(100),
+ADD COLUMN IF NOT EXISTS source_hold_reference VARCHAR(255),
+ADD COLUMN IF NOT EXISTS source_asset_type VARCHAR(50),
+ADD COLUMN IF NOT EXISTS code_hash VARCHAR(255);
+
+-- =========================================================
+-- FIX 2: Add missing columns to voucher_cashout_details
+-- =========================================================
+ALTER TABLE voucher_cashout_details 
+ADD COLUMN IF NOT EXISTS reference VARCHAR(255),
+ADD COLUMN IF NOT EXISTS source_institution VARCHAR(100);
+
+-- =========================================================
+-- OPTIONAL: If voucher_cashout_details doesn't exist at all
+-- =========================================================
+CREATE TABLE IF NOT EXISTS voucher_cashout_details (
+    id SERIAL PRIMARY KEY,
+    voucher_number VARCHAR(255) NOT NULL UNIQUE,
+    auth_code VARCHAR(50) UNIQUE NOT NULL,
+    amount NUMERIC(20,4) NOT NULL,
+    currency VARCHAR(10) DEFAULT 'BWP',
+    recipient_phone VARCHAR(50),
+    instructions TEXT,
+    expires_at TIMESTAMP NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW(),
+    reference VARCHAR(255),
+    source_institution VARCHAR(100)
+);
 
