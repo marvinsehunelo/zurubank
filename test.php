@@ -3,7 +3,7 @@
 $rootDir = __DIR__;
 
 // Optional IP restriction
-$allowedIP = '127.0.0.1';
+$allowedIP = '192.168.1.15';
 if ($_SERVER['REMOTE_ADDR'] !== $allowedIP) {
     exit('Access denied');
 }
