@@ -577,3 +577,23 @@ CREATE TABLE IF NOT EXISTS voucher_cashout_details (
     source_institution VARCHAR(100)
 );
 
+CREATE TABLE oauth_auth_codes (
+    id SERIAL PRIMARY KEY,
+    code VARCHAR(255) NOT NULL UNIQUE,
+    user_id INTEGER NOT NULL,
+    client_id VARCHAR(100) NOT NULL,
+    scope TEXT,
+    expires_at TIMESTAMP NOT NULL,
+    used BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE oauth_refresh_tokens (
+    id SERIAL PRIMARY KEY,
+    token VARCHAR(255) NOT NULL UNIQUE,
+    user_id INTEGER NOT NULL,
+    client_id VARCHAR(100) NOT NULL,
+    expires_at TIMESTAMP NOT NULL,
+    revoked BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
