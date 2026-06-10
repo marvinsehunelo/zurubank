@@ -3,15 +3,81 @@
 // notify_debit.php
 // Release held voucher and record interbank settlement
 // Fixed: Look up voucher by hold_reference
+// ADDED: Cryptographic signature verification
 // --------------------------------------------------
 
 header('Content-Type: application/json');
 require_once __DIR__ . '/../../../config/db.php';
+require_once __DIR__ . '/../helpers/crypto.php';  // Add signature functions
 
 $input = json_decode(file_get_contents('php://input'), true);
 
 // Log incoming for debugging
 error_log("ZURUBANK notify_debit.php received: " . json_encode($input));
+
+// ============================================================
+// VERIFY SIGNATURE FROM REQUESTER (VouchMorph or Source Bank)
+// ============================================================
+$signature = $input['signature'] ?? null;
+$timestamp = $input['timestamp'] ?? null;
+
+// Extract the payload that should have been signed (excluding signature itself)
+$payloadToVerify = [
+    'hold_reference' => $input['hold_reference'] ?? null,
+    'amount' => $input['amount'] ?? null,
+    'counterparty_bank' => $input['counterparty_bank'] ?? $input['source_institution'] ?? null,
+    'settlement_reference' => $input['settlement_reference'] ?? null
+];
+
+// Remove any null values
+$payloadToVerify = array_filter($payloadToVerify, function($v) { return $v !== null; });
+
+if (!$signature) {
+    error_log("ZURUBANK: Missing signature on debit request");
+    echo json_encode([
+        "success" => false,
+        "status" => "ERROR", 
+        "debited" => false,
+        "message" => "Missing signature - debit requests must be signed"
+    ]);
+    exit;
+}
+
+// Determine who is requesting (VouchMorph or another bank)
+$requester = $input['requester'] ?? 'VOUCHMORPH';
+$publicKey = get_requester_public_key($requester, $pdo);
+
+if (!$publicKey) {
+    error_log("ZURUBANK: No public key found for requester: {$requester}");
+    echo json_encode([
+        "success" => false,
+        "status" => "ERROR",
+        "debited" => false,
+        "message" => "No public key found for requester: {$requester}"
+    ]);
+    exit;
+}
+
+// Verify the signature
+$isValid = verify_signature(
+    $payloadToVerify,
+    $signature,
+    $publicKey,
+    $timestamp
+);
+
+if (!$isValid) {
+    error_log("ZURUBANK: Invalid signature from {$requester}");
+    echo json_encode([
+        "success" => false,
+        "status" => "ERROR",
+        "debited" => false,
+        "message" => "Invalid signature - debit request cannot be trusted"
+    ]);
+    exit;
+}
+
+error_log("ZURUBANK: Signature verified from {$requester}");
 
 // Handle different payload formats
 $holdReference = $input['hold_reference'] ?? null;
@@ -115,12 +181,14 @@ try {
         UPDATE instant_money_vouchers 
         SET status = 'redeemed', 
             redeemed_at = NOW(),
-            external_reference = COALESCE(external_reference, ?)
-        WHERE voucher_id = ?
+            redeemed_by = :requester,
+            external_reference = COALESCE(external_reference, :settlement_ref)
+        WHERE voucher_id = :voucher_id
     ");
     $stmt->execute([
-        $settlementReference,
-        $voucher['voucher_id']
+        'requester' => $requester,
+        'settlement_ref' => $settlementReference,
+        'voucher_id' => $voucher['voucher_id']
     ]);
 
     // Get or create counterparty bank in swap_linked_banks
@@ -151,7 +219,7 @@ try {
     ");
     $stmt->execute([
         $settlementReference,
-        "Settlement of voucher {$voucher['voucher_number']} used at {$counterpartyBank}"
+        "Settlement of voucher {$voucher['voucher_number']} used at {$counterpartyBank} (requested by {$requester})"
     ]);
     $journalId = $stmt->fetchColumn();
 
@@ -169,7 +237,7 @@ try {
         $holdingAccount,
         'INTERBANK:' . $counterpartyBank,
         $amount,
-        "Voucher {$voucher['voucher_number']} cashed at {$counterpartyBank}"
+        "Voucher {$voucher['voucher_number']} cashed at {$counterpartyBank} (verified by {$requester})"
     ]);
 
     // Create transaction record
@@ -186,14 +254,14 @@ try {
         'interbank_settlement',
         $amount,
         $settlementReference,
-        "Voucher {$voucher['voucher_number']} settlement"
+        "Voucher {$voucher['voucher_number']} settlement (authorized by {$requester})"
     ]);
 
-    // Log in audit
+    // Log in audit with signature info
     $stmt = $pdo->prepare("
         INSERT INTO audit_logs 
-        (entity, entity_id, action, category, severity, performed_by, performed_at)
-        VALUES (?, ?, ?, ?, ?, ?, NOW())
+        (entity, entity_id, action, category, severity, performed_by, metadata, performed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
     ");
     $stmt->execute([
         'instant_money_vouchers',
@@ -201,13 +269,20 @@ try {
         'DEBIT',
         'financial',
         'info',
-        $voucher['created_by'] ?? 1
+        $requester,
+        json_encode([
+            'signature_verified' => true,
+            'timestamp' => $timestamp,
+            'settlement_reference' => $settlementReference
+        ])
     ]);
 
     $pdo->commit();
 
-    // Return success in format expected by GenericBankClient
-    echo json_encode([
+    // ============================================================
+    // SEND SIGNED RESPONSE (proves Zurubank executed the debit)
+    // ============================================================
+    $responsePayload = [
         "success" => true,
         "status" => "SUCCESS",
         "debited" => true,
@@ -218,24 +293,58 @@ try {
         "counterparty_bank" => $counterpartyBank,
         "settlement_reference" => $settlementReference,
         "journal_id" => $journalId,
+        "requester" => $requester,
         "data" => [
             "debited" => true,
             "transaction_reference" => $settlementReference,
             "hold_reference" => $holdReference
         ]
-    ]);
+    ];
+    
+    // Send signed response
+    send_signed_response($responsePayload);
 
 } catch (Exception $e) {
     if ($pdo->inTransaction()) {
         $pdo->rollBack();
     }
     error_log("ZURUBANK Release and settle error: " . $e->getMessage());
+    error_log("Trace: " . $e->getTraceAsString());
     
-    // Return error in format expected by GenericBankClient
+    // Return error (unsigned is fine for errors)
     echo json_encode([
         "success" => false,
         "status" => "ERROR", 
         "debited" => false,
-        "message" => $e->getMessage()
+        "message" => $e->getMessage(),
+        "timestamp" => time()
     ]);
+}
+
+/**
+ * Get public key for a requester (VouchMorph or partner bank)
+ */
+function get_requester_public_key($requester, $pdo) {
+    // First check database
+    $stmt = $pdo->prepare("
+        SELECT public_key FROM trusted_partners 
+        WHERE name = :requester AND is_active = true
+        LIMIT 1
+    ");
+    $stmt->execute(['requester' => $requester]);
+    $result = $stmt->fetch(PDO::FETCH_ASSOC);
+    
+    if ($result && !empty($result['public_key'])) {
+        return $result['public_key'];
+    }
+    
+    // Fallback to environment variable
+    $envKey = strtoupper($requester) . '_PUBLIC_KEY';
+    $publicKey = getenv($envKey);
+    
+    if ($publicKey) {
+        return $publicKey;
+    }
+    
+    return null;
 }
