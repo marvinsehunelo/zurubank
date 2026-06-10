@@ -3,7 +3,7 @@
 
 header('Content-Type: application/json');
 require_once __DIR__ . '/../auth.php';
-require_once __DIR__ . '/../helpers/crypto.php';  // Add signature functions
+require_once __DIR__ . '/../../../helpers/crypto.php';  // Add signature functions
 
 // Validate API key first
 $client = validate_api_key();
