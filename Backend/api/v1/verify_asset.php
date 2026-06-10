@@ -5,7 +5,7 @@
  */
 
 require_once __DIR__ . '/../../config/db.php';
-require_once __DIR__ . '/../helpers/crypto.php';  // Add this line
+require_once __DIR__ . '/../../helpers/crypto.php';  // Add this line
 
 header("Content-Type: application/json");
 
