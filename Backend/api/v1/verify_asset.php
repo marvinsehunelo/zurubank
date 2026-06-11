@@ -1,11 +1,11 @@
 <?php
 /**
  * verify_asset_zurubank.php
- * Asset Verification for Zurubank - VOUCHER ONLY
+ * Asset Verification for Zurubank - VOUCHER and CASHOUT-VOUCHER
  */
 
 require_once __DIR__ . '/../../config/db.php';
-require_once __DIR__ . '/../../helpers/crypto.php';  // Add this line
+require_once __DIR__ . '/../../helpers/crypto.php';
 
 header("Content-Type: application/json");
 
@@ -62,16 +62,16 @@ $reference = $input['reference'] ?? $input['transaction_reference'] ?? null;
 
 error_log("Normalized - Type: $assetType, Voucher: $voucherNumber, Phone: $claimantPhone, Amount: $amount");
 
-// ZURUBANK ONLY HANDLES VOUCHERS
-if ($assetType !== 'VOUCHER') {
+// ZURUBANK HANDLES VOUCHER AND CASHOUT-VOUCHER
+if ($assetType !== 'VOUCHER' && $assetType !== 'CASHOUT-VOUCHER') {
     error_log("ERROR: Unsupported asset type for ZURUBANK: $assetType");
     echo json_encode([
         "success" => true,
         "verified" => false,
-        "message" => "ZURUBANK only supports VOUCHER asset type",
+        "message" => "ZURUBANK only supports VOUCHER or CASHOUT-VOUCHER asset type",
         "debug" => [
             "received_type" => $assetType,
-            "supported_types" => ["VOUCHER"]
+            "supported_types" => ["VOUCHER", "CASHOUT-VOUCHER"]
         ]
     ]);
     exit;
