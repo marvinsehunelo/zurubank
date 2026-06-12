@@ -2,13 +2,13 @@
 // --------------------------------------------------
 // notify_debit.php
 // Release held voucher and record interbank settlement
-// Fixed: Look up voucher by hold_reference
-// ADDED: Cryptographic signature verification
+// UPDATED: Certificate-based verification (Visa/Mastercard model)
 // --------------------------------------------------
 
 header('Content-Type: application/json');
 require_once __DIR__ . '/../../../config/db.php';
-require_once __DIR__ . '/../../../helpers/crypto.php';  // Add signature functions
+require_once __DIR__ . '/../../../helpers/crypto.php';
+require_once __DIR__ . '/../../../helpers/CertificateManager.php';
 
 $input = json_decode(file_get_contents('php://input'), true);
 
@@ -16,71 +16,47 @@ $input = json_decode(file_get_contents('php://input'), true);
 error_log("ZURUBANK notify_debit.php received: " . json_encode($input));
 
 // ============================================================
-// VERIFY SIGNATURE FROM REQUESTER (VouchMorph or Source Bank)
+// CERTIFICATE-BASED VERIFICATION (REQUIRED)
 // ============================================================
-$signature = $input['signature'] ?? null;
-$timestamp = $input['timestamp'] ?? null;
 
-// Extract the payload that should have been signed (excluding signature itself)
-$payloadToVerify = [
-    'hold_reference' => $input['hold_reference'] ?? null,
-    'amount' => $input['amount'] ?? null,
-    'counterparty_bank' => $input['counterparty_bank'] ?? $input['source_institution'] ?? null,
-    'settlement_reference' => $input['settlement_reference'] ?? null
-];
-
-// Remove any null values
-$payloadToVerify = array_filter($payloadToVerify, function($v) { return $v !== null; });
-
-if (!$signature) {
-    error_log("ZURUBANK: Missing signature on debit request");
+if (!isset($input['certificate'])) {
+    error_log("ZURUBANK NOTIFY_DEBIT: No certificate provided");
     echo json_encode([
         "success" => false,
         "status" => "ERROR", 
         "debited" => false,
-        "message" => "Missing signature - debit requests must be signed"
+        "message" => "Certificate required - please upgrade to certificate-based authentication"
     ]);
     exit;
 }
 
-// Determine who is requesting (VouchMorph or another bank)
-$requester = $input['requester'] ?? 'VOUCHMORPH';
-$publicKey = get_requester_public_key($requester, $pdo);
+$certManager = new CertificateManager('ZURUBANK');
+$verification = $certManager->verifySignedRequest($input);
+$isValid = $verification['verified'];
+$requester = $verification['requester'];
 
-if (!$publicKey) {
-    error_log("ZURUBANK: No public key found for requester: {$requester}");
-    echo json_encode([
-        "success" => false,
-        "status" => "ERROR",
-        "debited" => false,
-        "message" => "No public key found for requester: {$requester}"
-    ]);
-    exit;
-}
-
-// Verify the signature
-$isValid = verify_signature(
-    $payloadToVerify,
-    $signature,
-    $publicKey,
-    $timestamp
-);
+error_log("ZURUBANK NOTIFY_DEBIT: Certificate verification: " . ($isValid ? "VALID ✓" : "INVALID ✗"));
+error_log("ZURUBANK NOTIFY_DEBIT: Requester: {$requester}");
 
 if (!$isValid) {
-    error_log("ZURUBANK: Invalid signature from {$requester}");
+    error_log("ZURUBANK NOTIFY_DEBIT: Certificate verification failed");
     echo json_encode([
         "success" => false,
         "status" => "ERROR",
         "debited" => false,
-        "message" => "Invalid signature - debit request cannot be trusted"
+        "message" => "Certificate verification failed: " . ($verification['message'] ?? 'Unknown error')
     ]);
     exit;
 }
 
-error_log("ZURUBANK: Signature verified from {$requester}");
+error_log("ZURUBANK NOTIFY_DEBIT: Request verified from {$requester} using certificate");
+
+// ============================================================
+// PROCESS DEBIT
+// ============================================================
 
 // Handle different payload formats
-$holdReference = $input['hold_reference'] ?? null;
+$holdReference = $input['hold_reference'] ?? $input['reference'] ?? null;
 $amount = $input['amount'] ?? null;
 $transactionReference = $input['transaction_reference'] ?? null;
 
@@ -93,10 +69,10 @@ $counterpartyBank = $input['counterparty_bank'] ??
 // Generate settlement reference
 $settlementReference = $input['settlement_reference'] ?? 
                        $transactionReference ?? 
-                       'SET' . time() . rand(100, 999);
+                       'SET' . time() . '_' . rand(100, 999);
 
 if (!$holdReference || !$amount) {
-    error_log("ZURUBANK: Missing required fields - holdReference: $holdReference, amount: $amount");
+    error_log("ZURUBANK NOTIFY_DEBIT: Missing required fields - holdReference: $holdReference, amount: $amount");
     echo json_encode([
         "success" => false,
         "status" => "ERROR", 
@@ -113,24 +89,26 @@ try {
     // First, find the voucher by source_hold_reference (this is where the hold_reference is stored)
     $stmt = $pdo->prepare("
         SELECT voucher_id, voucher_number, amount, status, holding_account, created_by,
-               external_reference, source_institution, source_hold_reference
+               external_reference, source_institution, source_hold_reference,
+               currency, recipient_phone
         FROM instant_money_vouchers 
-        WHERE source_hold_reference = ? 
+        WHERE source_hold_reference = :hold_reference
         FOR UPDATE
     ");
-    $stmt->execute([$holdReference]);
+    $stmt->execute(['hold_reference' => $holdReference]);
     $voucher = $stmt->fetch(PDO::FETCH_ASSOC);
 
     // If not found, try external_reference
     if (!$voucher) {
         $stmt = $pdo->prepare("
             SELECT voucher_id, voucher_number, amount, status, holding_account, created_by,
-                   external_reference, source_institution, source_hold_reference
+                   external_reference, source_institution, source_hold_reference,
+                   currency, recipient_phone
             FROM instant_money_vouchers 
-            WHERE external_reference = ?
+            WHERE external_reference = :hold_reference
             FOR UPDATE
         ");
-        $stmt->execute([$holdReference]);
+        $stmt->execute(['hold_reference' => $holdReference]);
         $voucher = $stmt->fetch(PDO::FETCH_ASSOC);
     }
 
@@ -138,18 +116,19 @@ try {
     if (!$voucher) {
         $stmt = $pdo->prepare("
             SELECT voucher_id, voucher_number, amount, status, holding_account, created_by,
-                   external_reference, source_institution, source_hold_reference
+                   external_reference, source_institution, source_hold_reference,
+                   currency, recipient_phone
             FROM instant_money_vouchers 
-            WHERE voucher_number = ?
+            WHERE voucher_number = :hold_reference
             FOR UPDATE
         ");
-        $stmt->execute([$holdReference]);
+        $stmt->execute(['hold_reference' => $holdReference]);
         $voucher = $stmt->fetch(PDO::FETCH_ASSOC);
     }
 
     if (!$voucher) {
         // Log all possible matches for debugging
-        error_log("ZURUBANK: No voucher found for hold_reference: $holdReference");
+        error_log("ZURUBANK NOTIFY_DEBIT: No voucher found for hold_reference: $holdReference");
         
         // Check what's in the database
         $checkStmt = $pdo->query("
@@ -159,12 +138,12 @@ try {
             LIMIT 5
         ");
         $availableVouchers = $checkStmt->fetchAll(PDO::FETCH_ASSOC);
-        error_log("ZURUBANK: Available vouchers: " . json_encode($availableVouchers));
+        error_log("ZURUBANK NOTIFY_DEBIT: Available vouchers: " . json_encode($availableVouchers));
         
         throw new Exception("Voucher not found for hold reference: $holdReference");
     }
 
-    error_log("ZURUBANK: Found voucher {$voucher['voucher_number']} for hold reference $holdReference");
+    error_log("ZURUBANK NOTIFY_DEBIT: Found voucher {$voucher['voucher_number']} for hold reference $holdReference");
 
     // Check status - allow both 'hold' and 'active' to be debited
     if ($voucher['status'] !== 'hold' && $voucher['status'] !== 'active') {
@@ -182,11 +161,14 @@ try {
         SET status = 'redeemed', 
             redeemed_at = NOW(),
             redeemed_by = :requester,
-            external_reference = COALESCE(external_reference, :settlement_ref)
+            redeemed_by_cert_verified = :cert_verified,
+            settlement_reference = :settlement_ref,
+            updated_at = NOW()
         WHERE voucher_id = :voucher_id
     ");
     $stmt->execute([
         'requester' => $requester,
+        'cert_verified' => $isValid ? 1 : 0,
         'settlement_ref' => $settlementReference,
         'voucher_id' => $voucher['voucher_id']
     ]);
@@ -194,32 +176,40 @@ try {
     // Get or create counterparty bank in swap_linked_banks
     $stmt = $pdo->prepare("
         SELECT id, bank_code FROM swap_linked_banks 
-        WHERE bank_code = ? OR bank_name = ?
+        WHERE bank_code = :bank_code OR bank_name = :bank_name
         LIMIT 1
     ");
-    $stmt->execute([$counterpartyBank, $counterpartyBank]);
+    $stmt->execute([
+        'bank_code' => $counterpartyBank,
+        'bank_name' => $counterpartyBank
+    ]);
     $bank = $stmt->fetch(PDO::FETCH_ASSOC);
     
     if (!$bank) {
         // Insert the counterparty bank if not exists
         $stmt = $pdo->prepare("
-            INSERT INTO swap_linked_banks (bank_code, bank_name, status)
-            VALUES (?, ?, 'active')
+            INSERT INTO swap_linked_banks (bank_code, bank_name, status, created_at)
+            VALUES (:bank_code, :bank_name, 'active', NOW())
             RETURNING id, bank_code
         ");
-        $stmt->execute([$counterpartyBank, $counterpartyBank]);
+        $stmt->execute([
+            'bank_code' => $counterpartyBank,
+            'bank_name' => $counterpartyBank
+        ]);
         $bank = $stmt->fetch(PDO::FETCH_ASSOC);
+        error_log("ZURUBANK NOTIFY_DEBIT: Created new counterparty bank record for: {$counterpartyBank}");
     }
 
     // Create a journal entry for this settlement
     $stmt = $pdo->prepare("
-        INSERT INTO journals (reference, description, created_at)
-        VALUES (?, ?, NOW())
+        INSERT INTO journals (reference, description, created_by, created_at)
+        VALUES (:reference, :description, :created_by, NOW())
         RETURNING journal_id
     ");
     $stmt->execute([
-        $settlementReference,
-        "Settlement of voucher {$voucher['voucher_number']} used at {$counterpartyBank} (requested by {$requester})"
+        'reference' => $settlementReference,
+        'description' => "Settlement of voucher {$voucher['voucher_number']} used at {$counterpartyBank} (requested by {$requester})",
+        'created_by' => $requester
     ]);
     $journalId = $stmt->fetchColumn();
 
@@ -229,58 +219,70 @@ try {
     $stmt = $pdo->prepare("
         INSERT INTO swap_ledger 
         (reference_id, journal_id, debit_account, credit_account, amount, currency, description, created_at) 
-        VALUES (?, ?, ?, ?, ?, 'BWP', ?, NOW())
+        VALUES (:reference_id, :journal_id, :debit_account, :credit_account, :amount, :currency, :description, NOW())
     ");
     $stmt->execute([
-        $settlementReference,
-        $journalId,
-        $holdingAccount,
-        'INTERBANK:' . $counterpartyBank,
-        $amount,
-        "Voucher {$voucher['voucher_number']} cashed at {$counterpartyBank} (verified by {$requester})"
+        'reference_id' => $settlementReference,
+        'journal_id' => $journalId,
+        'debit_account' => $holdingAccount,
+        'credit_account' => 'INTERBANK:' . $counterpartyBank,
+        'amount' => $amount,
+        'currency' => $voucher['currency'] ?? 'BWP',
+        'description' => "Voucher {$voucher['voucher_number']} cashed at {$counterpartyBank} (verified by {$requester})"
     ]);
 
     // Create transaction record
     $stmt = $pdo->prepare("
         INSERT INTO transactions 
-        (user_id, account_id, from_account, to_account, type, amount, reference, description, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'completed', NOW())
+        (user_id, account_id, from_account, to_account, type, amount, reference, description, status, 
+         requester, signature_verified, verification_method, created_at)
+        VALUES 
+        (:user_id, :account_id, :from_account, :to_account, :type, :amount, :reference, :description, 'completed', 
+         :requester, :sig_verified, :verification_method, NOW())
     ");
     $stmt->execute([
-        $voucher['created_by'] ?? 1,
-        0,
-        $holdingAccount,
-        "BANK:{$counterpartyBank}",
-        'interbank_settlement',
-        $amount,
-        $settlementReference,
-        "Voucher {$voucher['voucher_number']} settlement (authorized by {$requester})"
+        'user_id' => $voucher['created_by'] ?? 1,
+        'account_id' => 0,
+        'from_account' => $holdingAccount,
+        'to_account' => "BANK:{$counterpartyBank}",
+        'type' => 'interbank_settlement',
+        'amount' => $amount,
+        'reference' => $settlementReference,
+        'description' => "Voucher {$voucher['voucher_number']} settlement (authorized by {$requester})",
+        'requester' => $requester,
+        'sig_verified' => $isValid ? 1 : 0,
+        'verification_method' => 'certificate'
     ]);
 
     // Log in audit with signature info
     $stmt = $pdo->prepare("
         INSERT INTO audit_logs 
-        (entity, entity_id, action, category, severity, performed_by, metadata, performed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+        (entity_type, entity_id, action, category, severity, performed_by, performed_by_cert_verified, 
+         verification_method, metadata, performed_at)
+        VALUES 
+        ('instant_money_vouchers', :entity_id, 'DEBIT', 'financial', 'info', :performed_by, :cert_verified,
+         :verification_method, :metadata, NOW())
     ");
     $stmt->execute([
-        'instant_money_vouchers',
-        $voucher['voucher_id'],
-        'DEBIT',
-        'financial',
-        'info',
-        $requester,
-        json_encode([
-            'signature_verified' => true,
-            'timestamp' => $timestamp,
-            'settlement_reference' => $settlementReference
+        'entity_id' => $voucher['voucher_id'],
+        'performed_by' => $requester,
+        'cert_verified' => $isValid ? 1 : 0,
+        'verification_method' => 'certificate',
+        'metadata' => json_encode([
+            'signature_verified' => $isValid,
+            'settlement_reference' => $settlementReference,
+            'hold_reference' => $holdReference,
+            'amount' => $amount,
+            'counterparty_bank' => $counterpartyBank
         ])
     ]);
 
     $pdo->commit();
 
+    error_log("ZURUBANK NOTIFY_DEBIT: Debit completed - Voucher: {$voucher['voucher_number']}, Settlement: {$settlementReference}");
+
     // ============================================================
-    // SEND SIGNED RESPONSE (proves Zurubank executed the debit)
+    // SEND SIGNED RESPONSE WITH CERTIFICATE
     // ============================================================
     $responsePayload = [
         "success" => true,
@@ -289,11 +291,15 @@ try {
         "message" => "Voucher released and interbank settlement recorded",
         "voucher_number" => $voucher['voucher_number'],
         "hold_reference" => $holdReference,
-        "amount" => $amount,
+        "amount" => (float)$amount,
+        "currency" => $voucher['currency'] ?? 'BWP',
         "counterparty_bank" => $counterpartyBank,
         "settlement_reference" => $settlementReference,
         "journal_id" => $journalId,
         "requester" => $requester,
+        "signature_verified" => $isValid,
+        "verification_method" => "certificate",
+        "timestamp" => time(),
         "data" => [
             "debited" => true,
             "transaction_reference" => $settlementReference,
@@ -305,13 +311,14 @@ try {
     send_signed_response($responsePayload);
 
 } catch (Exception $e) {
-    if ($pdo->inTransaction()) {
+    if (isset($pdo) && $pdo->inTransaction()) {
         $pdo->rollBack();
     }
-    error_log("ZURUBANK Release and settle error: " . $e->getMessage());
-    error_log("Trace: " . $e->getTraceAsString());
+    error_log("ZURUBANK NOTIFY_DEBIT ERROR: " . $e->getMessage());
+    error_log("ZURUBANK NOTIFY_DEBIT Trace: " . $e->getTraceAsString());
+    error_log("ZURUBANK NOTIFY_DEBIT Input: " . json_encode($input ?? []));
     
-    // Return error (unsigned is fine for errors)
+    // Return error with timestamp
     echo json_encode([
         "success" => false,
         "status" => "ERROR", 
@@ -319,32 +326,4 @@ try {
         "message" => $e->getMessage(),
         "timestamp" => time()
     ]);
-}
-
-/**
- * Get public key for a requester (VouchMorph or partner bank)
- */
-function get_requester_public_key($requester, $pdo) {
-    // First check database
-    $stmt = $pdo->prepare("
-        SELECT public_key FROM trusted_partners 
-        WHERE name = :requester AND is_active = true
-        LIMIT 1
-    ");
-    $stmt->execute(['requester' => $requester]);
-    $result = $stmt->fetch(PDO::FETCH_ASSOC);
-    
-    if ($result && !empty($result['public_key'])) {
-        return $result['public_key'];
-    }
-    
-    // Fallback to environment variable
-    $envKey = strtoupper($requester) . '_PUBLIC_KEY';
-    $publicKey = getenv($envKey);
-    
-    if ($publicKey) {
-        return $publicKey;
-    }
-    
-    return null;
 }
