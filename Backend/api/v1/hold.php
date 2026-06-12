@@ -3,12 +3,12 @@
  * backend/api/v1/hold.php
  * Unified hold endpoint for Zurubank
  * Handles VOUCHER, ACCOUNT, and WALLET holds
- * FIXED: Stores hold reference in source_hold_reference column
- * ADDED: Cryptographic signatures for bank-to-bank trust
+ * UPDATED: Certificate-based verification (Visa/Mastercard model)
  */
 
 require_once __DIR__ . '/../../config/db.php';
-require_once __DIR__ . '/../../helpers/crypto.php';  // Add signature functions
+require_once __DIR__ . '/../../helpers/crypto.php';
+require_once __DIR__ . '/../../helpers/CertificateManager.php';
 
 header('Content-Type: application/json');
 
@@ -17,6 +17,44 @@ try {
     
     error_log("=== ZURUBANK hold.php received ===");
     error_log(json_encode($input));
+
+    // ============================================================
+    // CERTIFICATE-BASED VERIFICATION (REQUIRED)
+    // ============================================================
+    
+    if (!isset($input['certificate'])) {
+        error_log("ZURUBANK HOLD: No certificate provided");
+        echo json_encode([
+            'status' => 'ERROR',
+            'hold_placed' => false,
+            'message' => 'Certificate required - please upgrade to certificate-based authentication'
+        ]);
+        exit;
+    }
+    
+    $certManager = new CertificateManager('ZURUBANK');
+    $verification = $certManager->verifySignedRequest($input);
+    $isValid = $verification['verified'];
+    $requester = $verification['requester'];
+    
+    error_log("ZURUBANK HOLD: Certificate verification: " . ($isValid ? "VALID ✓" : "INVALID ✗"));
+    error_log("ZURUBANK HOLD: Requester: {$requester}");
+    
+    if (!$isValid) {
+        error_log("ZURUBANK HOLD: Certificate verification failed");
+        echo json_encode([
+            'status' => 'ERROR',
+            'hold_placed' => false,
+            'message' => 'Certificate verification failed: ' . ($verification['message'] ?? 'Unknown error')
+        ]);
+        exit;
+    }
+    
+    error_log("ZURUBANK HOLD: Request verified from {$requester} using certificate");
+
+    // ============================================================
+    // PROCESS HOLD
+    // ============================================================
 
     // Determine action
     $action = strtoupper(trim($input['action'] ?? $input['type'] ?? 'PLACE'));
@@ -48,7 +86,7 @@ try {
         else throw new Exception("Could not determine asset type");
     }
     
-    error_log("Action: $action, AssetType: $assetType, HoldRef: $holdReference");
+    error_log("ZURUBANK HOLD: Action: $action, AssetType: $assetType, HoldRef: $holdReference, Amount: $amount");
 
     // Validate required fields
     if ($amount <= 0) {
@@ -60,6 +98,7 @@ try {
 
     $responsePayload = [];
     $assetId = null;
+    $holdPlaced = false;
 
     // Process based on asset type and action
     if ($assetType === 'VOUCHER') {
@@ -95,15 +134,21 @@ try {
                 UPDATE instant_money_vouchers
                 SET status = 'hold',
                     source_hold_reference = :hold_reference,
-                    hold_expires_at = NOW() + INTERVAL '1 hour'
+                    hold_expires_at = NOW() + INTERVAL '1 hour',
+                    held_by = :requester,
+                    hold_signature_verified = :sig_verified,
+                    updated_at = NOW()
                 WHERE voucher_id = :voucher_id
             ");
             $stmt->execute([
                 'hold_reference' => $holdReference,
-                'voucher_id' => $voucher['voucher_id']
+                'voucher_id' => $voucher['voucher_id'],
+                'requester' => $requester,
+                'sig_verified' => $isValid ? 1 : 0
             ]);
             
             $assetId = $voucher['voucher_id'];
+            $holdPlaced = true;
             $responsePayload = [
                 'status' => 'SUCCESS',
                 'hold_placed' => true,
@@ -113,7 +158,9 @@ try {
                 'asset_id' => $voucher['voucher_id'],
                 'voucher_number' => $voucherNumber,
                 'amount' => floatval($voucher['amount']),
-                'currency' => $voucher['currency'] ?? 'BWP'
+                'currency' => $voucher['currency'] ?? 'BWP',
+                'requester' => $requester,
+                'signature_verified' => $isValid
             ];
             
         } elseif (in_array($action, ['RELEASE', 'RELEASE_HOLD', 'UNHOLD'])) {
@@ -126,16 +173,21 @@ try {
                 UPDATE instant_money_vouchers
                 SET status = 'active',
                     source_hold_reference = NULL,
-                    hold_expires_at = NULL
+                    hold_expires_at = NULL,
+                    released_by = :requester,
+                    released_at = NOW(),
+                    updated_at = NOW()
                 WHERE voucher_id = :voucher_id
                 AND source_hold_reference = :hold_reference
             ");
             $stmt->execute([
                 'voucher_id' => $voucher['voucher_id'],
-                'hold_reference' => $holdReference
+                'hold_reference' => $holdReference,
+                'requester' => $requester
             ]);
             
             $assetId = $voucher['voucher_id'];
+            $holdPlaced = false;
             $responsePayload = [
                 'status' => 'SUCCESS',
                 'hold_placed' => false,
@@ -144,7 +196,9 @@ try {
                 'asset_type' => 'VOUCHER',
                 'asset_id' => $voucher['voucher_id'],
                 'voucher_number' => $voucherNumber,
-                'amount' => floatval($voucher['amount'])
+                'amount' => floatval($voucher['amount']),
+                'requester' => $requester,
+                'signature_verified' => $isValid
             ];
             
         } else {
@@ -183,10 +237,13 @@ try {
                     account_id BIGINT,
                     wallet_id BIGINT,
                     amount DECIMAL(20,4) NOT NULL,
-                    hold_reference VARCHAR(50) UNIQUE NOT NULL,
+                    hold_reference VARCHAR(100) UNIQUE NOT NULL,
                     status VARCHAR(30) DEFAULT 'HELD',
+                    requester VARCHAR(100),
+                    signature_verified BOOLEAN DEFAULT FALSE,
                     expires_at TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT NOW()
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
                 )
             ");
 
@@ -198,15 +255,16 @@ try {
             // Create hold record
             $stmt = $pdo->prepare("
                 INSERT INTO financial_holds 
-                    (account_id, amount, hold_reference, status, expires_at)
+                    (account_id, amount, hold_reference, status, requester, signature_verified, expires_at, created_at, updated_at)
                 VALUES 
-                    (?, ?, ?, 'HELD', NOW() + INTERVAL '24 hours')
+                    (?, ?, ?, 'HELD', ?, ?, NOW() + INTERVAL '24 hours', NOW(), NOW())
                 RETURNING id
             ");
-            $stmt->execute([$account['account_id'], $amount, $holdReference]);
+            $stmt->execute([$account['account_id'], $amount, $holdReference, $requester, $isValid ? 1 : 0]);
             $holdId = $stmt->fetchColumn();
             
             $assetId = $account['account_id'];
+            $holdPlaced = true;
             $responsePayload = [
                 'status' => 'SUCCESS',
                 'hold_placed' => true,
@@ -216,21 +274,27 @@ try {
                 'asset_id' => $account['account_id'],
                 'account_number' => $accountNumber,
                 'amount' => $amount,
-                'currency' => $account['currency'] ?? 'BWP'
+                'currency' => $account['currency'] ?? 'BWP',
+                'requester' => $requester,
+                'signature_verified' => $isValid
             ];
             
         } elseif (in_array($action, ['RELEASE', 'RELEASE_HOLD'])) {
             // Release hold
             $stmt = $pdo->prepare("
                 UPDATE financial_holds 
-                SET status = 'RELEASED' 
+                SET status = 'RELEASED', 
+                    released_by = :requester,
+                    released_at = NOW(),
+                    updated_at = NOW()
                 WHERE hold_reference = ? AND status = 'HELD'
                 RETURNING account_id
             ");
-            $stmt->execute([$holdReference]);
+            $stmt->execute(['hold_reference' => $holdReference, 'requester' => $requester]);
             $released = $stmt->fetch(PDO::FETCH_ASSOC);
             
             $assetId = $released['account_id'] ?? null;
+            $holdPlaced = false;
             $responsePayload = [
                 'status' => 'SUCCESS',
                 'hold_placed' => false,
@@ -238,7 +302,9 @@ try {
                 'hold_reference' => $holdReference,
                 'asset_type' => 'ACCOUNT',
                 'asset_id' => $assetId,
-                'account_number' => $accountNumber
+                'account_number' => $accountNumber,
+                'requester' => $requester,
+                'signature_verified' => $isValid
             ];
             
         } else {
@@ -250,17 +316,23 @@ try {
             throw new Exception("Phone number required for wallet hold");
         }
 
+        // Normalize phone
+        $normalizedPhone = ltrim($phone, '+');
+
         // Find wallet via users table
         $stmt = $pdo->prepare("
             SELECT w.wallet_id, w.balance, w.status, w.currency, u.user_id
             FROM instant_money_wallets w
             JOIN users u ON w.user_id = u.user_id
-            WHERE u.phone = :phone
+            WHERE u.phone = :phone OR u.phone = :phone_with_plus
             AND w.status = 'active'
             LIMIT 1
             FOR UPDATE
         ");
-        $stmt->execute(['phone' => $phone]);
+        $stmt->execute([
+            'phone' => $normalizedPhone,
+            'phone_with_plus' => $phone
+        ]);
         $wallet = $stmt->fetch(PDO::FETCH_ASSOC);
 
         if (!$wallet) {
@@ -275,10 +347,13 @@ try {
                     account_id BIGINT,
                     wallet_id BIGINT,
                     amount DECIMAL(20,4) NOT NULL,
-                    hold_reference VARCHAR(50) UNIQUE NOT NULL,
+                    hold_reference VARCHAR(100) UNIQUE NOT NULL,
                     status VARCHAR(30) DEFAULT 'HELD',
+                    requester VARCHAR(100),
+                    signature_verified BOOLEAN DEFAULT FALSE,
                     expires_at TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT NOW()
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
                 )
             ");
 
@@ -290,15 +365,16 @@ try {
             // Create hold record
             $stmt = $pdo->prepare("
                 INSERT INTO financial_holds 
-                    (wallet_id, amount, hold_reference, status, expires_at)
+                    (wallet_id, amount, hold_reference, status, requester, signature_verified, expires_at, created_at, updated_at)
                 VALUES 
-                    (?, ?, ?, 'HELD', NOW() + INTERVAL '24 hours')
+                    (?, ?, ?, 'HELD', ?, ?, NOW() + INTERVAL '24 hours', NOW(), NOW())
                 RETURNING id
             ");
-            $stmt->execute([$wallet['wallet_id'], $amount, $holdReference]);
+            $stmt->execute([$wallet['wallet_id'], $amount, $holdReference, $requester, $isValid ? 1 : 0]);
             $holdId = $stmt->fetchColumn();
             
             $assetId = $wallet['wallet_id'];
+            $holdPlaced = true;
             $responsePayload = [
                 'status' => 'SUCCESS',
                 'hold_placed' => true,
@@ -308,20 +384,26 @@ try {
                 'asset_id' => $wallet['wallet_id'],
                 'phone' => $phone,
                 'amount' => $amount,
-                'currency' => $wallet['currency'] ?? 'BWP'
+                'currency' => $wallet['currency'] ?? 'BWP',
+                'requester' => $requester,
+                'signature_verified' => $isValid
             ];
             
         } elseif (in_array($action, ['RELEASE', 'RELEASE_HOLD'])) {
             $stmt = $pdo->prepare("
                 UPDATE financial_holds 
-                SET status = 'RELEASED' 
+                SET status = 'RELEASED', 
+                    released_by = :requester,
+                    released_at = NOW(),
+                    updated_at = NOW()
                 WHERE hold_reference = ? AND status = 'HELD'
                 RETURNING wallet_id
             ");
-            $stmt->execute([$holdReference]);
+            $stmt->execute(['hold_reference' => $holdReference, 'requester' => $requester]);
             $released = $stmt->fetch(PDO::FETCH_ASSOC);
             
             $assetId = $released['wallet_id'] ?? null;
+            $holdPlaced = false;
             $responsePayload = [
                 'status' => 'SUCCESS',
                 'hold_placed' => false,
@@ -329,7 +411,9 @@ try {
                 'hold_reference' => $holdReference,
                 'asset_type' => 'WALLET',
                 'asset_id' => $assetId,
-                'phone' => $phone
+                'phone' => $phone,
+                'requester' => $requester,
+                'signature_verified' => $isValid
             ];
             
         } else {
@@ -342,14 +426,19 @@ try {
 
     $pdo->commit();
     
+    error_log("ZURUBANK HOLD: Hold processed successfully - Ref: {$holdReference}, AssetType: {$assetType}");
+    
     // ============================================================
-    // SEND SIGNED RESPONSE USING CRYPTO.PHP
+    // SEND SIGNED RESPONSE WITH CERTIFICATE
     // ============================================================
     
-    // Add the asset_id to response payload if not already there
+    // Add missing fields if needed
     if ($assetId && !isset($responsePayload['asset_id'])) {
         $responsePayload['asset_id'] = $assetId;
     }
+    
+    $responsePayload['verification_method'] = 'certificate';
+    $responsePayload['timestamp'] = time();
     
     // Send signed response (adds signature and timestamp automatically)
     send_signed_response($responsePayload);
@@ -358,8 +447,9 @@ try {
     if (isset($pdo) && $pdo->inTransaction()) {
         $pdo->rollBack();
     }
-    error_log("ZURUBANK hold.php error: " . $e->getMessage());
-    error_log("Trace: " . $e->getTraceAsString());
+    error_log("ZURUBANK hold.php ERROR: " . $e->getMessage());
+    error_log("ZURUBANK hold.php Trace: " . $e->getTraceAsString());
+    error_log("ZURUBANK hold.php Input: " . json_encode($input ?? []));
     
     http_response_code(400);
     echo json_encode([
