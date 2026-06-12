@@ -3,7 +3,7 @@
 // generate_code.php
 // ZuruBank Instant Money Voucher Generator
 // ALIGNED with SwapService expectations
-// ADDED: Cryptographic signature verification
+// UPDATED: Certificate-based verification (Visa/Mastercard model)
 // --------------------------------------------------
 
 header('Content-Type: application/json');
@@ -11,23 +11,24 @@ ini_set('display_errors', 1);
 error_reporting(E_ALL);
 
 require_once __DIR__ . '/../../../config/db.php';
-require_once __DIR__ . '/../../../helpers/crypto.php';  // Add signature functions
+require_once __DIR__ . '/../../../helpers/crypto.php';
+require_once __DIR__ . '/../../../helpers/CertificateManager.php';
 
-function generateVoucherSwap(PDO $pdo, array $payload, string $requester, bool $signatureVerified): array
+function generateVoucherSwap(PDO $pdo, array $payload, string $requester, bool $signatureVerified, string $verificationMethod): array
 {
     try {
         $pdo->beginTransaction();
 
         // Log incoming payload
         error_log("ZURUBANK generate_code.php received from: {$requester}");
-        error_log("Signature verified: " . ($signatureVerified ? 'YES' : 'NO'));
+        error_log("Verification method: {$verificationMethod}, Verified: " . ($signatureVerified ? 'YES' : 'NO'));
         error_log("Payload: " . json_encode($payload));
 
         // ------------------------------------------------------------
         // EXACTLY MATCHING SWAPSERVICE FIELDS
         // ------------------------------------------------------------
         
-        $beneficiaryPhone = trim($payload['beneficiary_phone'] ?? '');
+        $beneficiaryPhone = trim($payload['beneficiary_phone'] ?? $payload['phone'] ?? '');
         $amount = floatval($payload['amount'] ?? 0);
         $reference = trim($payload['reference'] ?? '');
         $sourceInstitution = trim($payload['source_institution'] ?? 'SACCUSSALIS');
@@ -44,12 +45,13 @@ function generateVoucherSwap(PDO $pdo, array $payload, string $requester, bool $
         if ($idempotencyKey) {
             $checkStmt = $pdo->prepare("
                 SELECT voucher_id FROM instant_money_vouchers 
-                WHERE reference = :reference OR code_hash = :code_hash
+                WHERE reference = :reference OR code_hash = :code_hash OR external_reference = :idempotency_key
                 LIMIT 1
             ");
             $checkStmt->execute([
                 'reference' => $reference,
-                'code_hash' => $idempotencyKey
+                'code_hash' => $codeHash,
+                'idempotency_key' => $idempotencyKey
             ]);
             
             if ($checkStmt->fetch()) {
@@ -62,7 +64,7 @@ function generateVoucherSwap(PDO $pdo, array $payload, string $requester, bool $
             }
         }
 
-        // Create tables if not exists (unchanged)
+        // Create tables if not exists (with enhanced columns)
         $pdo->exec("
             CREATE TABLE IF NOT EXISTS instant_money_vouchers (
                 voucher_id SERIAL PRIMARY KEY,
@@ -75,13 +77,16 @@ function generateVoucherSwap(PDO $pdo, array $payload, string $requester, bool $
                 status VARCHAR(20) DEFAULT 'active',
                 holding_account VARCHAR(50),
                 created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW(),
                 reference VARCHAR(255),
+                external_reference VARCHAR(255),
                 source_institution VARCHAR(100),
                 source_hold_reference VARCHAR(255),
                 source_asset_type VARCHAR(50),
                 code_hash VARCHAR(255),
                 created_by_requester VARCHAR(100),
-                signature_verified BOOLEAN DEFAULT FALSE
+                signature_verified BOOLEAN DEFAULT FALSE,
+                verification_method VARCHAR(50)
             )
         ");
 
@@ -96,10 +101,12 @@ function generateVoucherSwap(PDO $pdo, array $payload, string $requester, bool $
                 instructions TEXT,
                 expires_at TIMESTAMP NOT NULL,
                 created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW(),
                 reference VARCHAR(255),
                 source_institution VARCHAR(100),
                 requester VARCHAR(100),
-                signature_verified BOOLEAN DEFAULT FALSE
+                signature_verified BOOLEAN DEFAULT FALSE,
+                verification_method VARCHAR(50)
             )
         ");
 
@@ -125,13 +132,16 @@ function generateVoucherSwap(PDO $pdo, array $payload, string $requester, bool $
                 status,
                 holding_account,
                 created_at,
+                updated_at,
                 reference,
+                external_reference,
                 source_institution,
                 source_hold_reference,
                 source_asset_type,
                 code_hash,
                 created_by_requester,
-                signature_verified
+                signature_verified,
+                verification_method
             )
             VALUES (
                 :amount,
@@ -143,13 +153,16 @@ function generateVoucherSwap(PDO $pdo, array $payload, string $requester, bool $
                 'active',
                 'VOUCHER-SUSPENSE',
                 NOW(),
+                NOW(),
                 :reference,
+                :external_reference,
                 :source_institution,
                 :source_hold_reference,
                 :source_asset_type,
                 :code_hash,
                 :requester,
-                :signature_verified
+                :signature_verified,
+                :verification_method
             )
             RETURNING voucher_id
         ");
@@ -161,12 +174,14 @@ function generateVoucherSwap(PDO $pdo, array $payload, string $requester, bool $
             ':voucher_pin'            => $voucherPin,
             ':expires_at'             => $expiresAt,
             ':reference'              => $reference,
+            ':external_reference'     => $idempotencyKey ?: $reference,
             ':source_institution'     => $sourceInstitution,
             ':source_hold_reference'  => $sourceHoldReference,
             ':source_asset_type'      => $sourceAssetType,
             ':code_hash'              => $idempotencyKey ?: $codeHash,
             ':requester'              => $requester,
-            ':signature_verified'     => $signatureVerified ? 1 : 0
+            ':signature_verified'     => $signatureVerified ? 1 : 0,
+            ':verification_method'    => $verificationMethod
         ]);
 
         $voucherId = $stmt->fetchColumn();
@@ -208,10 +223,13 @@ function generateVoucherSwap(PDO $pdo, array $payload, string $requester, bool $
                 recipient_phone,
                 instructions,
                 expires_at,
+                created_at,
+                updated_at,
                 reference,
                 source_institution,
                 requester,
-                signature_verified
+                signature_verified,
+                verification_method
             )
             VALUES (
                 :voucher_number,
@@ -221,10 +239,13 @@ function generateVoucherSwap(PDO $pdo, array $payload, string $requester, bool $
                 :recipient_phone,
                 :instructions,
                 :expires_at,
+                NOW(),
+                NOW(),
                 :reference,
                 :source_institution,
                 :requester,
-                :signature_verified
+                :signature_verified,
+                :verification_method
             )
             RETURNING id
         ");
@@ -239,36 +260,58 @@ function generateVoucherSwap(PDO $pdo, array $payload, string $requester, bool $
             ':reference'       => $reference,
             ':source_institution' => $sourceInstitution,
             ':requester'       => $requester,
-            ':signature_verified' => $signatureVerified ? 1 : 0
+            ':signature_verified' => $signatureVerified ? 1 : 0,
+            ':verification_method' => $verificationMethod
         ]);
 
         $detailsId = $stmtDetails->fetchColumn();
 
+        // Create audit logs table if needed
+        $pdo->exec("
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                id SERIAL PRIMARY KEY,
+                entity_type VARCHAR(100),
+                entity_id INTEGER,
+                action VARCHAR(50),
+                category VARCHAR(50),
+                severity VARCHAR(20),
+                performed_by VARCHAR(100),
+                performed_by_cert_verified BOOLEAN DEFAULT FALSE,
+                verification_method VARCHAR(50),
+                metadata JSONB,
+                performed_at TIMESTAMP DEFAULT NOW()
+            )
+        ");
+
         // Audit log
         $auditStmt = $pdo->prepare("
             INSERT INTO audit_logs 
-            (entity, entity_id, action, category, severity, performed_by, metadata, performed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+            (entity_type, entity_id, action, category, severity, performed_by, 
+             performed_by_cert_verified, verification_method, metadata, performed_at)
+            VALUES 
+            ('instant_money_vouchers', :entity_id, 'GENERATE', 'financial', 'info', :performed_by,
+             :cert_verified, :verification_method, :metadata, NOW())
         ");
         $auditStmt->execute([
-            'instant_money_vouchers',
-            $voucherId,
-            'GENERATE',
-            'financial',
-            'info',
-            $requester,
-            json_encode([
+            'entity_id' => $voucherId,
+            'performed_by' => $requester,
+            'cert_verified' => $signatureVerified ? 1 : 0,
+            'verification_method' => $verificationMethod,
+            'metadata' => json_encode([
                 'signature_verified' => $signatureVerified,
                 'amount' => $amount,
                 'reference' => $reference,
-                'beneficiary' => $beneficiaryPhone
+                'beneficiary' => $beneficiaryPhone,
+                'voucher_number' => $voucherNumber
             ])
         ]);
 
         $pdo->commit();
 
+        error_log("ZURUBANK: Voucher generated successfully - Number: {$voucherNumber}, Amount: {$amount}, Reference: {$reference}");
+
         // ============================================================
-        // SEND SIGNED RESPONSE
+        // SEND SIGNED RESPONSE WITH CERTIFICATE
         // ============================================================
         $responsePayload = [
             'success' => true,
@@ -283,7 +326,9 @@ function generateVoucherSwap(PDO $pdo, array $payload, string $requester, bool $
             'currency' => 'BWP',
             'requester' => $requester,
             'signature_verified' => $signatureVerified,
+            'verification_method' => $verificationMethod,
             'message' => 'ATM token generated successfully',
+            'timestamp' => time(),
             'metadata' => [
                 'voucher_id' => $voucherId,
                 'reference' => $reference,
@@ -328,82 +373,43 @@ if (!$payload) {
 }
 
 // ============================================================
-// VERIFY SIGNATURE FROM REQUESTER
+// CERTIFICATE-BASED VERIFICATION (REQUIRED)
 // ============================================================
-$signature = $payload['signature'] ?? null;
-$timestamp = $payload['timestamp'] ?? null;
 
-$payloadToVerify = [
-    'reference' => $payload['reference'] ?? null,
-    'beneficiary_phone' => $payload['beneficiary_phone'] ?? null,
-    'amount' => $payload['amount'] ?? null,
-    'source_institution' => $payload['source_institution'] ?? null,
-    'currency' => $payload['currency'] ?? 'BWP'
-];
-$payloadToVerify = array_filter($payloadToVerify);
-
-if (!$signature) {
-    error_log("ZURUBANK generate_code: Missing signature");
+if (!isset($payload['certificate'])) {
+    error_log("ZURUBANK generate_code: No certificate provided");
     echo json_encode([
         'success' => false,
         'token_generated' => false,
-        'error' => 'Missing signature - voucher generation requests must be signed',
+        'error' => 'Certificate required - please upgrade to certificate-based authentication',
         'timestamp' => time()
     ]);
     exit;
 }
 
-// Determine who is requesting
-$requester = $payload['requester'] ?? 'VOUCHMORPH';
-$publicKey = get_requester_public_key($requester, $pdo);
+$certManager = new CertificateManager('ZURUBANK');
+$verification = $certManager->verifySignedRequest($payload);
+$isValid = $verification['verified'];
+$requester = $verification['requester'];
 
-if (!$publicKey) {
-    error_log("ZURUBANK generate_code: No public key for requester: {$requester}");
-    echo json_encode([
-        'success' => false,
-        'token_generated' => false,
-        'error' => "No public key found for requester: {$requester}",
-        'timestamp' => time()
-    ]);
-    exit;
-}
-
-// Verify signature
-$isValid = verify_signature($payloadToVerify, $signature, $publicKey, $timestamp);
+error_log("ZURUBANK generate_code: Certificate verification: " . ($isValid ? "VALID ✓" : "INVALID ✗"));
+error_log("ZURUBANK generate_code: Requester: {$requester}");
 
 if (!$isValid) {
-    error_log("ZURUBANK generate_code: Invalid signature from {$requester}");
+    error_log("ZURUBANK generate_code: Certificate verification failed");
     echo json_encode([
         'success' => false,
         'token_generated' => false,
-        'error' => 'Invalid signature - voucher generation cannot be trusted',
+        'error' => 'Certificate verification failed: ' . ($verification['message'] ?? 'Unknown error'),
         'timestamp' => time()
     ]);
     exit;
 }
 
-error_log("ZURUBANK generate_code: Signature verified from {$requester}");
+error_log("ZURUBANK generate_code: Request verified from {$requester} using certificate");
 
 // Execute generation with verified requester
-$result = generateVoucherSwap($pdo, $payload, $requester, true);
-echo json_encode($result);
-
-/**
- * Get public key for a requester
- */
-function get_requester_public_key($requester, $pdo) {
-    $stmt = $pdo->prepare("
-        SELECT public_key FROM trusted_partners 
-        WHERE name = :requester AND is_active = true
-        LIMIT 1
-    ");
-    $stmt->execute(['requester' => $requester]);
-    $result = $stmt->fetch(PDO::FETCH_ASSOC);
-    
-    if ($result && !empty($result['public_key'])) {
-        return $result['public_key'];
-    }
-    
-    $envKey = strtoupper($requester) . '_PUBLIC_KEY';
-    return getenv($envKey) ?: null;
+$result = generateVoucherSwap($pdo, $payload, $requester, true, 'certificate');
+if (isset($result['error'])) {
+    echo json_encode($result);
 }
