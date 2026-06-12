@@ -2,7 +2,7 @@
 // --------------------------------------------------
 // atm_cashout_voucher.php
 // ZuruBank ATM Voucher Cashout (Swap Origin Supported)
-// ADDED: Cryptographic signature verification
+// UPDATED: Certificate-based verification (Visa/Mastercard model)
 // --------------------------------------------------
 
 header('Content-Type: application/json');
@@ -11,7 +11,8 @@ error_reporting(E_ALL);
 
 require __DIR__ . '/../../../config/db.php';
 require __DIR__ . '/../../../helpers/response.php';
-require __DIR__ . '/../../helpers/crypto.php';  // Add signature functions
+require __DIR__ . '/../../helpers/crypto.php';
+require __DIR__ . '/../../helpers/CertificateManager.php';
 
 // -------------------------
 // Read Input
@@ -21,7 +22,6 @@ $data = json_decode(file_get_contents("php://input"), true);
 $voucherNumber = trim($data['voucher_number'] ?? '');
 $voucherPin    = trim($data['voucher_pin'] ?? '');
 $atmId         = $data['atm_id'] ?? 'ATM001';
-$signature     = $data['signature'] ?? null;
 $timestamp     = $data['timestamp'] ?? null;
 $requester     = $data['requester'] ?? 'ATM_SYSTEM';
 
@@ -31,56 +31,42 @@ if (!$voucherNumber || !$voucherPin) {
 }
 
 // ============================================================
-// VERIFY SIGNATURE FROM REQUESTER (VouchMorph or ATM)
+// CERTIFICATE-BASED VERIFICATION (REQUIRED)
 // ============================================================
-$payloadToVerify = [
-    'voucher_number' => $voucherNumber,
-    'voucher_pin' => $voucherPin,
-    'atm_id' => $atmId,
-    'timestamp' => $timestamp
-];
-$payloadToVerify = array_filter($payloadToVerify);
 
-if (!$signature) {
-    error_log("ATM Cashout: Missing signature");
+if (!isset($data['certificate'])) {
+    error_log("ATM Cashout: No certificate provided");
     json_response("DECLINED", [
-        "message" => "Missing signature - cashout requests must be signed",
+        "message" => "Certificate required - please upgrade to certificate-based authentication",
         "timestamp" => time()
     ]);
     exit;
 }
 
-// Get public key for requester
-$publicKey = get_requester_public_key($requester, $pdo);
+$certManager = new CertificateManager('ZURUBANK');
+$verification = $certManager->verifySignedRequest($data);
+$isValid = $verification['verified'];
+$requester = $verification['requester'];
 
-if (!$publicKey) {
-    error_log("ATM Cashout: No public key for requester: {$requester}");
-    json_response("DECLINED", [
-        "message" => "No public key found for requester: {$requester}",
-        "timestamp" => time()
-    ]);
-    exit;
-}
-
-// Verify signature
-$isValid = verify_signature($payloadToVerify, $signature, $publicKey, $timestamp);
+error_log("ATM Cashout: Certificate verification: " . ($isValid ? "VALID ✓" : "INVALID ✗"));
+error_log("ATM Cashout: Requester: {$requester}");
 
 if (!$isValid) {
-    error_log("ATM Cashout: Invalid signature from {$requester}");
+    error_log("ATM Cashout: Certificate verification failed");
     json_response("DECLINED", [
-        "message" => "Invalid signature - cashout request cannot be trusted",
+        "message" => "Certificate verification failed: " . ($verification['message'] ?? 'Unknown error'),
         "timestamp" => time()
     ]);
     exit;
 }
 
-error_log("ATM Cashout: Signature verified from {$requester}");
+error_log("ATM Cashout: Request verified from {$requester} using certificate");
 
 try {
     $pdo->beginTransaction();
 
     // -------------------------
-    // Check if atm_dispenses table exists
+    // Check/Create tables with enhanced columns
     // -------------------------
     try {
         $pdo->exec("
@@ -91,7 +77,9 @@ try {
                 amount NUMERIC(20,4) NOT NULL,
                 status VARCHAR(50) DEFAULT 'DISPENSED',
                 created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW(),
                 signature_verified BOOLEAN DEFAULT FALSE,
+                verification_method VARCHAR(50),
                 requester VARCHAR(100)
             )
         ");
@@ -105,15 +93,24 @@ try {
             $pdo->exec("ALTER TABLE atm_dispenses ADD COLUMN currency VARCHAR(10) DEFAULT 'BWP'");
         }
         
-        // Add requester and signature_verified columns if not exists
-        $stmtCheckReq = $pdo->query("
+        // Add verification_method column if not exists
+        $stmtCheckVm = $pdo->query("
             SELECT column_name 
             FROM information_schema.columns 
-            WHERE table_name = 'atm_dispenses' AND column_name = 'requester'
+            WHERE table_name = 'atm_dispenses' AND column_name = 'verification_method'
         ");
-        if (!$stmtCheckReq->fetch()) {
-            $pdo->exec("ALTER TABLE atm_dispenses ADD COLUMN requester VARCHAR(100)");
-            $pdo->exec("ALTER TABLE atm_dispenses ADD COLUMN signature_verified BOOLEAN DEFAULT FALSE");
+        if (!$stmtCheckVm->fetch()) {
+            $pdo->exec("ALTER TABLE atm_dispenses ADD COLUMN verification_method VARCHAR(50)");
+        }
+        
+        // Add updated_at column if not exists
+        $stmtCheckUp = $pdo->query("
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name = 'atm_dispenses' AND column_name = 'updated_at'
+        ");
+        if (!$stmtCheckUp->fetch()) {
+            $pdo->exec("ALTER TABLE atm_dispenses ADD COLUMN updated_at TIMESTAMP DEFAULT NOW()");
         }
     } catch (Exception $e) {
         error_log("Table setup warning: " . $e->getMessage());
@@ -124,21 +121,23 @@ try {
     // -------------------------
     $stmt = $pdo->prepare("
         SELECT * FROM instant_money_vouchers
-        WHERE voucher_number = ?
+        WHERE voucher_number = :voucher_number
         FOR UPDATE
     ");
-    $stmt->execute([$voucherNumber]);
+    $stmt->execute(['voucher_number' => $voucherNumber]);
     $voucher = $stmt->fetch(PDO::FETCH_ASSOC);
 
     if (!$voucher) {
-        throw new Exception("Voucher not found");
+        throw new Exception("Voucher not found: {$voucherNumber}");
     }
+
+    error_log("ATM Cashout: Found voucher ID={$voucher['voucher_id']}, Status={$voucher['status']}, Amount={$voucher['amount']}");
 
     // -------------------------
     // 3️⃣ Validate PIN
     // -------------------------
     if ($voucher['voucher_pin'] !== $voucherPin) {
-        throw new Exception("Invalid PIN");
+        throw new Exception("Invalid PIN for voucher: {$voucherNumber}");
     }
 
     // -------------------------
@@ -158,7 +157,7 @@ try {
     // 5️⃣ Check Expiry
     // -------------------------
     if ($voucher['voucher_expires_at'] && strtotime($voucher['voucher_expires_at']) < time()) {
-        throw new Exception("Voucher expired");
+        throw new Exception("Voucher expired at: {$voucher['voucher_expires_at']}");
     }
 
     $amount = floatval($voucher['amount']);
@@ -170,15 +169,18 @@ try {
         UPDATE instant_money_vouchers
         SET status = 'redeemed',
             redeemed_at = NOW(),
+            updated_at = NOW(),
             redeemed_by = :requester,
             redeemed_via = 'ATM',
-            redemption_signature_verified = :signature_verified
+            redemption_signature_verified = :sig_verified,
+            redemption_verification_method = :verification_method
         WHERE voucher_id = :voucher_id
     ");
     $update->execute([
         ':voucher_id' => $voucher['voucher_id'],
         ':requester' => $requester,
-        ':signature_verified' => $isValid ? 1 : 0
+        ':sig_verified' => $isValid ? 1 : 0,
+        ':verification_method' => 'certificate'
     ]);
 
     // -------------------------
@@ -186,13 +188,21 @@ try {
     // -------------------------
     $cashoutReference = 'CASHOUT-' . time() . '-' . substr($voucherNumber, -6);
     
-    // Check if cashouts table has the required columns
+    // Ensure cashouts table has required columns
     try {
         $stmtCheckCols = $pdo->query("
             SELECT column_name FROM information_schema.columns 
-            WHERE table_name = 'cashouts' AND column_name = 'requester'
+            WHERE table_name = 'cashouts' AND column_name = 'verification_method'
         ");
         if (!$stmtCheckCols->fetch()) {
+            $pdo->exec("ALTER TABLE cashouts ADD COLUMN verification_method VARCHAR(50)");
+        }
+        
+        $stmtCheckReq = $pdo->query("
+            SELECT column_name FROM information_schema.columns 
+            WHERE table_name = 'cashouts' AND column_name = 'requester'
+        ");
+        if (!$stmtCheckReq->fetch()) {
             $pdo->exec("ALTER TABLE cashouts ADD COLUMN requester VARCHAR(100)");
             $pdo->exec("ALTER TABLE cashouts ADD COLUMN signature_verified BOOLEAN DEFAULT FALSE");
         }
@@ -212,8 +222,10 @@ try {
             atm_id,
             requester,
             signature_verified,
+            verification_method,
             created_at,
-            dispensed_at
+            dispensed_at,
+            updated_at
         )
         VALUES (
             :trace_number,
@@ -225,7 +237,9 @@ try {
             'COMPLETED',
             :atm_id,
             :requester,
-            :signature_verified,
+            :sig_verified,
+            :verification_method,
+            NOW(),
             NOW(),
             NOW()
         )
@@ -240,7 +254,8 @@ try {
         ':amount' => $amount,
         ':atm_id' => $atmId,
         ':requester' => $requester,
-        ':signature_verified' => $isValid ? 1 : 0
+        ':sig_verified' => $isValid ? 1 : 0,
+        ':verification_method' => 'certificate'
     ]);
     $cashoutId = $insertCashout->fetchColumn();
 
@@ -260,9 +275,11 @@ try {
                 status,
                 requester,
                 signature_verified,
-                created_at
+                verification_method,
+                created_at,
+                updated_at
             )
-            VALUES (?, ?, ?, 'BWP', 'DISPENSED', ?, ?, NOW())
+            VALUES (?, ?, ?, 'BWP', 'DISPENSED', ?, ?, ?, NOW(), NOW())
             ON CONFLICT (trace_number) DO NOTHING
         ");
         $insert->execute([
@@ -270,7 +287,8 @@ try {
             $voucherNumber,
             $amount,
             $requester,
-            $isValid ? 1 : 0
+            $isValid ? 1 : 0,
+            'certificate'
         ]);
     } else {
         $insert = $pdo->prepare("
@@ -281,9 +299,11 @@ try {
                 status,
                 requester,
                 signature_verified,
-                created_at
+                verification_method,
+                created_at,
+                updated_at
             )
-            VALUES (?, ?, ?, 'DISPENSED', ?, ?, NOW())
+            VALUES (?, ?, ?, 'DISPENSED', ?, ?, ?, NOW(), NOW())
             ON CONFLICT (trace_number) DO NOTHING
         ");
         $insert->execute([
@@ -291,7 +311,8 @@ try {
             $voucherNumber,
             $amount,
             $requester,
-            $isValid ? 1 : 0
+            $isValid ? 1 : 0,
+            'certificate'
         ]);
     }
 
@@ -310,7 +331,9 @@ try {
             status,
             requester,
             signature_verified,
-            created_at
+            verification_method,
+            created_at,
+            updated_at
         )
         VALUES (
             :user_id,
@@ -322,7 +345,9 @@ try {
             :description,
             'completed',
             :requester,
-            :signature_verified,
+            :sig_verified,
+            :verification_method,
+            NOW(),
             NOW()
         )
     ");
@@ -335,7 +360,8 @@ try {
         ':reference' => $voucherNumber,
         ':description' => "ATM cashout of voucher {$voucherNumber} at {$atmId} (authorized by {$requester})",
         ':requester' => $requester,
-        ':signature_verified' => $isValid ? 1 : 0
+        ':sig_verified' => $isValid ? 1 : 0,
+        ':verification_method' => 'certificate'
     ]);
 
     // -------------------------
@@ -350,6 +376,7 @@ try {
             currency,
             description,
             requester,
+            signature_verified,
             created_at
         )
         VALUES (
@@ -360,6 +387,7 @@ try {
             'BWP',
             :description,
             :requester,
+            :sig_verified,
             NOW()
         )
     ");
@@ -370,7 +398,8 @@ try {
         ':credit_account' => 'ATM:' . $atmId,
         ':amount' => $amount,
         ':description' => "ATM cashout settlement for voucher {$voucherNumber} (authorized by {$requester})",
-        ':requester' => $requester
+        ':requester' => $requester,
+        ':sig_verified' => $isValid ? 1 : 0
     ]);
 
     // -------------------------
@@ -378,37 +407,44 @@ try {
     // -------------------------
     $auditStmt = $pdo->prepare("
         INSERT INTO audit_logs 
-        (entity, entity_id, action, category, severity, performed_by, metadata, performed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+        (entity_type, entity_id, action, category, severity, performed_by, 
+         performed_by_cert_verified, verification_method, metadata, performed_at)
+        VALUES 
+        ('instant_money_vouchers', :entity_id, 'CASHOUT', 'financial', 'info', :performed_by,
+         :cert_verified, :verification_method, :metadata, NOW())
     ");
     $auditStmt->execute([
-        'instant_money_vouchers',
-        $voucher['voucher_id'],
-        'CASHOUT',
-        'financial',
-        'info',
-        $requester,
-        json_encode([
+        'entity_id' => $voucher['voucher_id'],
+        'performed_by' => $requester,
+        'cert_verified' => $isValid ? 1 : 0,
+        'verification_method' => 'certificate',
+        'metadata' => json_encode([
             'signature_verified' => $isValid,
             'amount' => $amount,
             'atm_id' => $atmId,
-            'voucher_number' => $voucherNumber
+            'voucher_number' => $voucherNumber,
+            'cashout_id' => $cashoutId
         ])
     ]);
 
     $pdo->commit();
 
+    error_log("ATM Cashout: Cashout completed - Voucher: {$voucherNumber}, Amount: {$amount}, ATM: {$atmId}");
+
     // ============================================================
-    // SEND SIGNED RESPONSE
+    // SEND SIGNED RESPONSE WITH CERTIFICATE
     // ============================================================
     $responsePayload = [
         "status" => "CASHOUT_SUCCESS",
         "voucher_number" => $voucherNumber,
         "amount" => $amount,
+        "currency" => "BWP",
         "atm_id" => $atmId,
         "cashout_id" => $cashoutId,
+        "cashout_reference" => $cashoutReference,
         "requester" => $requester,
         "signature_verified" => $isValid,
+        "verification_method" => "certificate",
         "timestamp" => date("Y-m-d H:i:s"),
         "message" => "Cashout successful"
     ];
@@ -416,35 +452,16 @@ try {
     send_signed_response($responsePayload);
 
 } catch (Exception $e) {
-    if ($pdo->inTransaction()) {
+    if (isset($pdo) && $pdo->inTransaction()) {
         $pdo->rollBack();
     }
 
-    error_log("ATM Cashout Error: " . $e->getMessage());
-    error_log("Trace: " . $e->getTraceAsString());
+    error_log("ATM Cashout ERROR: " . $e->getMessage());
+    error_log("ATM Cashout Trace: " . $e->getTraceAsString());
+    error_log("ATM Cashout Input: " . json_encode($data ?? []));
     
     json_response("DECLINED", [
         "message" => $e->getMessage(),
         "timestamp" => time()
     ]);
-}
-
-/**
- * Get public key for a requester
- */
-function get_requester_public_key($requester, $pdo) {
-    $stmt = $pdo->prepare("
-        SELECT public_key FROM trusted_partners 
-        WHERE name = :requester AND is_active = true
-        LIMIT 1
-    ");
-    $stmt->execute(['requester' => $requester]);
-    $result = $stmt->fetch(PDO::FETCH_ASSOC);
-    
-    if ($result && !empty($result['public_key'])) {
-        return $result['public_key'];
-    }
-    
-    $envKey = strtoupper($requester) . '_PUBLIC_KEY';
-    return getenv($envKey) ?: null;
 }
