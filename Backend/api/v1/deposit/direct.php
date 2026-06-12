@@ -1,12 +1,13 @@
 <?php
 /**
  * ZURUBANK Direct Deposit - Compatible with SwapService
- * ADDED: Cryptographic signature verification
+ * UPDATED: Certificate-based verification (Visa/Mastercard model)
  */
 
 header('Content-Type: application/json');
 require_once __DIR__ . '/../../../config/db.php';
-require_once __DIR__ . '/../../../helpers/crypto.php';  // Add signature functions
+require_once __DIR__ . '/../../../helpers/crypto.php';
+require_once __DIR__ . '/../../../helpers/CertificateManager.php';
 
 $input = json_decode(file_get_contents("php://input"), true);
 
@@ -14,75 +15,95 @@ error_log("=== ZURUBANK DEPOSIT ENDPOINT ===");
 error_log("Input: " . json_encode($input));
 
 // ============================================================
-// VERIFY SIGNATURE FROM REQUESTER (VouchMorph or Source Bank)
+// CERTIFICATE-BASED VERIFICATION (REQUIRED)
 // ============================================================
-$signature = $input['signature'] ?? null;
-$timestamp = $input['timestamp'] ?? null;
-$idempotencyKey = $input['idempotency_key'] ?? $input['idempotencyKey'] ?? null;
 
-$payloadToVerify = [
-    'reference' => $input['reference'] ?? null,
-    'source_institution' => $input['source_institution'] ?? null,
-    'destination_account' => $input['destination_account'] ?? null,
-    'amount' => $input['amount'] ?? null,
-    'currency' => $input['currency'] ?? 'BWP',
-    'idempotency_key' => $idempotencyKey
-];
-$payloadToVerify = array_filter($payloadToVerify);
-
-if (!$signature) {
-    error_log("ZURUBANK DEPOSIT: Missing signature");
+if (!isset($input['certificate'])) {
+    error_log("ZURUBANK DEPOSIT: No certificate provided");
     echo json_encode([
         'processed' => false,
-        'message' => 'Missing signature - deposit requests must be signed',
+        'message' => 'Certificate required - please upgrade to certificate-based authentication',
         'timestamp' => time()
     ]);
     exit;
 }
 
-// Determine who is requesting
-$requester = $input['requester'] ?? 'VOUCHMORPH';
-$publicKey = get_requester_public_key($requester, $pdo);
+$certManager = new CertificateManager('ZURUBANK');
+$verification = $certManager->verifySignedRequest($input);
+$isValid = $verification['verified'];
+$requester = $verification['requester'];
 
-if (!$publicKey) {
-    error_log("ZURUBANK DEPOSIT: No public key for requester: {$requester}");
-    echo json_encode([
-        'processed' => false,
-        'message' => "No public key found for requester: {$requester}",
-        'timestamp' => time()
-    ]);
-    exit;
-}
-
-// Verify signature
-$isValid = verify_signature($payloadToVerify, $signature, $publicKey, $timestamp);
+error_log("ZURUBANK DEPOSIT: Certificate verification: " . ($isValid ? "VALID ✓" : "INVALID ✗"));
+error_log("ZURUBANK DEPOSIT: Requester: {$requester}");
 
 if (!$isValid) {
-    error_log("ZURUBANK DEPOSIT: Invalid signature from {$requester}");
+    error_log("ZURUBANK DEPOSIT: Certificate verification failed");
     echo json_encode([
         'processed' => false,
-        'message' => 'Invalid signature - deposit request cannot be trusted',
+        'message' => 'Certificate verification failed: ' . ($verification['message'] ?? 'Unknown error'),
         'timestamp' => time()
     ]);
     exit;
 }
 
-error_log("ZURUBANK DEPOSIT: Signature verified from {$requester}");
+error_log("ZURUBANK DEPOSIT: Request verified from {$requester} using certificate");
+
+// ============================================================
+// PROCESS DEPOSIT
+// ============================================================
+
+// Map SwapService fields to internal fields
+$reference = $input['reference'] ?? $input['depositRef'] ?? uniqid('DEP-');
+$sourceInstitution = $input['source_institution'] ?? $input['from_bank'] ?? 'UNKNOWN';
+$sourceHoldReference = $input['source_hold_reference'] ?? null;
+$destinationAccount = $input['destination_account'] ?? $input['account_number'] ?? null;
+$amount = (float)($input['amount'] ?? 0);
+$action = $input['action'] ?? 'PROCESS_DEPOSIT';
+$currency = $input['currency'] ?? 'BWP';
+$idempotencyKey = $input['idempotency_key'] ?? $input['idempotencyKey'] ?? null;
+
+if (!$destinationAccount || $amount <= 0) {
+    error_log("ZURUBANK DEPOSIT: Missing required fields - account: {$destinationAccount}, amount: {$amount}");
+    echo json_encode([
+        'processed' => false,
+        'message' => 'destination_account and valid amount are required',
+        'timestamp' => time()
+    ]);
+    exit;
+}
 
 // Check idempotency to prevent replay attacks
 if ($idempotencyKey) {
+    // Create idempotency table if not exists
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS processed_deposits (
+            id SERIAL PRIMARY KEY,
+            deposit_ref VARCHAR(100) UNIQUE,
+            account_number VARCHAR(50),
+            amount DECIMAL(20,4),
+            idempotency_key VARCHAR(255) UNIQUE NOT NULL,
+            requester VARCHAR(100),
+            signature_verified BOOLEAN DEFAULT FALSE,
+            verification_method VARCHAR(50),
+            processed_at TIMESTAMP DEFAULT NOW(),
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+    ");
+    
     $checkStmt = $pdo->prepare("
-        SELECT id FROM processed_deposits 
-        WHERE idempotency_key = :key AND processed_at > NOW() - INTERVAL '24 hours'
+        SELECT id, deposit_ref FROM processed_deposits 
+        WHERE idempotency_key = :key
         LIMIT 1
     ");
     $checkStmt->execute(['key' => $idempotencyKey]);
+    $existing = $checkStmt->fetch(PDO::FETCH_ASSOC);
     
-    if ($checkStmt->fetch()) {
+    if ($existing) {
         error_log("ZURUBANK DEPOSIT: Duplicate request prevented (idempotency key: {$idempotencyKey})");
         echo json_encode([
             'processed' => true,
             'duplicate' => true,
+            'deposit_ref' => $existing['deposit_ref'],
             'message' => 'Duplicate request - already processed',
             'timestamp' => time()
         ]);
@@ -91,117 +112,181 @@ if ($idempotencyKey) {
 }
 
 try {
-    // Map SwapService fields to internal fields
-    $reference = $input['reference'] ?? uniqid('DEP-');
-    $sourceInstitution = $input['source_institution'] ?? 'UNKNOWN';
-    $sourceHoldReference = $input['source_hold_reference'] ?? null;
-    $destinationAccount = $input['destination_account'] ?? null;
-    $amount = (float)($input['amount'] ?? 0);
-    $action = $input['action'] ?? 'PROCESS_DEPOSIT';
-    $currency = $input['currency'] ?? 'BWP';
-
-    if (!$destinationAccount || $amount <= 0) {
-        throw new Exception("destination_account and valid amount are required");
-    }
+    // Ensure accounts table has required columns
+    $pdo->exec("
+        ALTER TABLE accounts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
+        ALTER TABLE accounts ADD COLUMN IF NOT EXISTS currency VARCHAR(3) DEFAULT 'BWP';
+    ");
 
     $pdo->beginTransaction();
 
     // Lock and get account
     $stmt = $pdo->prepare("
-        SELECT account_id, user_id, balance, currency 
+        SELECT account_id, user_id, balance, currency, account_number 
         FROM accounts 
-        WHERE account_number = ? 
+        WHERE account_number = :account_number OR account_number = :account_number_alt
         FOR UPDATE
     ");
-    $stmt->execute([$destinationAccount]);
+    $stmt->execute([
+        'account_number' => $destinationAccount,
+        'account_number_alt' => ltrim($destinationAccount, '0')
+    ]);
     $account = $stmt->fetch(PDO::FETCH_ASSOC);
 
     if (!$account) {
-        throw new Exception("Account not found: $destinationAccount");
+        throw new Exception("Account not found: {$destinationAccount}");
     }
 
     // Check currency match
     if ($account['currency'] !== $currency) {
-        throw new Exception("Currency mismatch. Account: {$account['currency']}, Requested: $currency");
+        throw new Exception("Currency mismatch. Account: {$account['currency']}, Requested: {$currency}");
     }
 
     // Record old balance for audit
-    $oldBalance = $account['balance'];
+    $oldBalance = (float)$account['balance'];
     $newBalance = $oldBalance + $amount;
 
     // Update balance
-    $pdo->prepare("
+    $updateStmt = $pdo->prepare("
         UPDATE accounts 
-        SET balance = balance + ?
-        WHERE account_number = ?
-    ")->execute([$amount, $destinationAccount]);
+        SET balance = balance + :amount,
+            updated_at = NOW()
+        WHERE account_number = :account_number
+    ");
+    $updateStmt->execute([
+        'amount' => $amount,
+        'account_number' => $destinationAccount
+    ]);
 
     // Generate trace number
-    $trace = 'DEP' . time() . rand(100, 999);
+    $trace = 'DEP_' . time() . '_' . rand(100, 999) . '_' . substr(md5($reference), 0, 6);
+
+    // Create transactions table if needed
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS transactions (
+            transaction_id SERIAL PRIMARY KEY,
+            user_id INTEGER,
+            account_id INTEGER,
+            from_account VARCHAR(100),
+            to_account VARCHAR(100),
+            type VARCHAR(50),
+            amount DECIMAL(20,4),
+            reference VARCHAR(255),
+            trace_number VARCHAR(100) UNIQUE,
+            status VARCHAR(50) DEFAULT 'completed',
+            requester VARCHAR(100),
+            signature_verified BOOLEAN DEFAULT FALSE,
+            verification_method VARCHAR(50),
+            notes TEXT,
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW()
+        )
+    ");
 
     // Record transaction with signature info
-    $pdo->prepare("
+    $transStmt = $pdo->prepare("
         INSERT INTO transactions
         (user_id, account_id, from_account, to_account,
          type, amount, reference, trace_number, status, 
-         requester, signature_verified, created_at)
-        VALUES (?, ?, ?, ?, 'deposit', ?, ?, ?, 'completed', ?, ?, NOW())
-    ")->execute([
-        $account['user_id'],
-        $account['account_id'],
-        $sourceInstitution,
-        $destinationAccount,
-        $amount,
-        $reference,
-        $trace,
-        $requester,
-        true  // signature_verified
+         requester, signature_verified, verification_method, notes, created_at, updated_at)
+        VALUES 
+        (:user_id, :account_id, :from_account, :to_account,
+         'deposit', :amount, :reference, :trace_number, 'completed',
+         :requester, :sig_verified, :verification_method, :notes, NOW(), NOW())
+    ");
+    $transStmt->execute([
+        'user_id' => $account['user_id'],
+        'account_id' => $account['account_id'],
+        'from_account' => $sourceInstitution,
+        'to_account' => $destinationAccount,
+        'amount' => $amount,
+        'reference' => $reference,
+        'trace_number' => $trace,
+        'requester' => $requester,
+        'sig_verified' => $isValid ? 1 : 0,
+        'verification_method' => 'certificate',
+        'notes' => json_encode([
+            'source_hold_reference' => $sourceHoldReference,
+            'original_request' => $input
+        ])
     ]);
 
     // Store idempotency with signature info
     if ($idempotencyKey) {
-        $pdo->prepare("
+        $idempotencyStmt = $pdo->prepare("
             INSERT INTO processed_deposits
             (deposit_ref, account_number, amount, idempotency_key, 
-             requester, signature_verified, processed_at)
-            VALUES (?, ?, ?, ?, ?, ?, NOW())
+             requester, signature_verified, verification_method, processed_at)
+            VALUES 
+            (:deposit_ref, :account_number, :amount, :key, 
+             :requester, :sig_verified, :verification_method, NOW())
             ON CONFLICT (idempotency_key) DO NOTHING
-        ")->execute([$trace, $destinationAccount, $amount, $idempotencyKey, $requester, true]);
+        ");
+        $idempotencyStmt->execute([
+            'deposit_ref' => $trace,
+            'account_number' => $destinationAccount,
+            'amount' => $amount,
+            'key' => $idempotencyKey,
+            'requester' => $requester,
+            'sig_verified' => $isValid ? 1 : 0,
+            'verification_method' => 'certificate'
+        ]);
     }
 
+    // Create audit logs table if needed
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS audit_logs (
+            id SERIAL PRIMARY KEY,
+            entity_type VARCHAR(50),
+            entity_id INTEGER,
+            action VARCHAR(50),
+            category VARCHAR(50),
+            severity VARCHAR(20),
+            performed_by VARCHAR(100),
+            performed_by_cert_verified BOOLEAN DEFAULT FALSE,
+            verification_method VARCHAR(50),
+            old_value JSONB,
+            new_value JSONB,
+            metadata JSONB,
+            performed_at TIMESTAMP DEFAULT NOW()
+        )
+    ");
+
     // Audit log
-    $pdo->prepare("
+    $auditStmt = $pdo->prepare("
         INSERT INTO audit_logs 
-        (entity, entity_id, action, category, severity, performed_by, 
-         old_value, new_value, metadata, performed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
-    ")->execute([
-        'accounts',
-        $account['account_id'],
-        'DEPOSIT',
-        'financial',
-        'info',
-        $requester,
-        json_encode(['balance' => $oldBalance]),
-        json_encode(['balance' => $newBalance, 'amount' => $amount]),
-        json_encode([
-            'signature_verified' => true,
-            'timestamp' => $timestamp,
+        (entity_type, entity_id, action, category, severity, performed_by, 
+         performed_by_cert_verified, verification_method, old_value, new_value, metadata, performed_at)
+        VALUES 
+        ('accounts', :entity_id, 'DEPOSIT', 'financial', 'info', :performed_by,
+         :cert_verified, :verification_method, :old_value, :new_value, :metadata, NOW())
+    ");
+    $auditStmt->execute([
+        'entity_id' => $account['account_id'],
+        'performed_by' => $requester,
+        'cert_verified' => $isValid ? 1 : 0,
+        'verification_method' => 'certificate',
+        'old_value' => json_encode(['balance' => $oldBalance]),
+        'new_value' => json_encode(['balance' => $newBalance, 'amount' => $amount]),
+        'metadata' => json_encode([
+            'signature_verified' => $isValid,
             'reference' => $reference,
-            'trace' => $trace
+            'trace' => $trace,
+            'source_institution' => $sourceInstitution
         ])
     ]);
 
     $pdo->commit();
 
-    // Get new balance
-    $newBalance = $pdo->query("
-        SELECT balance FROM accounts 
-        WHERE account_number = '$destinationAccount'
-    ")->fetchColumn();
+    error_log("ZURUBANK DEPOSIT: Deposit completed - Trace: {$trace}, Amount: {$amount}, Account: {$destinationAccount}");
+
+    // Get final balance
+    $balanceStmt = $pdo->prepare("SELECT balance FROM accounts WHERE account_number = ?");
+    $balanceStmt->execute([$destinationAccount]);
+    $finalBalance = (float)$balanceStmt->fetchColumn();
 
     // ============================================================
-    // SEND SIGNED RESPONSE
+    // SEND SIGNED RESPONSE WITH CERTIFICATE
     // ============================================================
     $responsePayload = [
         'processed' => true,
@@ -209,21 +294,26 @@ try {
         'reference' => $reference,
         'amount' => $amount,
         'currency' => $currency,
-        'new_balance' => $newBalance,
+        'new_balance' => $finalBalance,
         'old_balance' => $oldBalance,
+        'account_number' => $destinationAccount,
         'requester' => $requester,
-        'message' => 'Deposit processed successfully'
+        'signature_verified' => $isValid,
+        'verification_method' => 'certificate',
+        'message' => 'Deposit processed successfully',
+        'timestamp' => time()
     ];
     
     send_signed_response($responsePayload);
 
 } catch (Exception $e) {
-    if ($pdo->inTransaction()) {
+    if (isset($pdo) && $pdo->inTransaction()) {
         $pdo->rollBack();
     }
     
-    error_log("ZURUBANK DEPOSIT error: " . $e->getMessage());
-    error_log("Trace: " . $e->getTraceAsString());
+    error_log("ZURUBANK DEPOSIT ERROR: " . $e->getMessage());
+    error_log("ZURUBANK DEPOSIT Trace: " . $e->getTraceAsString());
+    error_log("ZURUBANK DEPOSIT Input: " . json_encode($input ?? []));
     
     http_response_code(400);
     echo json_encode([
@@ -231,24 +321,4 @@ try {
         'message' => $e->getMessage(),
         'timestamp' => time()
     ]);
-}
-
-/**
- * Get public key for a requester
- */
-function get_requester_public_key($requester, $pdo) {
-    $stmt = $pdo->prepare("
-        SELECT public_key FROM trusted_partners 
-        WHERE name = :requester AND is_active = true
-        LIMIT 1
-    ");
-    $stmt->execute(['requester' => $requester]);
-    $result = $stmt->fetch(PDO::FETCH_ASSOC);
-    
-    if ($result && !empty($result['public_key'])) {
-        return $result['public_key'];
-    }
-    
-    $envKey = strtoupper($requester) . '_PUBLIC_KEY';
-    return getenv($envKey) ?: null;
 }
