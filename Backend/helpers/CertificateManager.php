@@ -1,7 +1,13 @@
 <?php
-// backend/helpers/CertificateManager.php
-// For ZURUBANK - Certificate-based PKI
+// zurubank/Backend/helpers/CertificateManager.php
 
+/**
+ * Certificate Manager - Visa/Mastercard style PKI
+ * 
+ * Members present their certificate with each request.
+ * Receivers verify against the trusted CA root.
+ * NO manual key exchange needed for new members!
+ */
 class CertificateManager
 {
     private ?string $caCert = null;
@@ -41,21 +47,33 @@ class CertificateManager
         }
     }
     
+    /**
+     * Get CA certificate (trust anchor)
+     */
     public function getCACertificate(): ?string
     {
         return $this->caCert;
     }
     
+    /**
+     * Get this member's certificate
+     */
     public function getMyCertificate(): ?string
     {
         return $this->myCertificate;
     }
     
+    /**
+     * Get this member's private key
+     */
     public function getMyPrivateKey(): ?string
     {
         return $this->myPrivateKey;
     }
     
+    /**
+     * Check if CertificateManager is properly configured
+     */
     public function isConfigured(): bool
     {
         return ($this->caCert !== null && $this->myPrivateKey !== null && $this->myCertificate !== null);
@@ -120,11 +138,13 @@ class CertificateManager
             return $publicKey;
         }
         
+        error_log("CertificateManager: Failed to extract public key from certificate");
         return null;
     }
     
     /**
      * Verify a signed request using certificate
+     * This matches what VOUCHMORPH does for verification
      */
     public function verifySignedRequest(array $request): array
     {
@@ -133,25 +153,30 @@ class CertificateManager
         $requester = $request['requester'] ?? 'UNKNOWN';
         
         if (!$certificate) {
+            error_log("CertificateManager: No certificate provided from {$requester}");
             return ['verified' => false, 'message' => 'No certificate provided', 'requester' => $requester];
         }
         
         if (!$signature) {
+            error_log("CertificateManager: No signature provided from {$requester}");
             return ['verified' => false, 'message' => 'No signature provided', 'requester' => $requester];
         }
         
         // Step 1: Verify certificate chains to trusted CA
         if (!$this->verifyCertificate($certificate)) {
+            error_log("CertificateManager: Certificate not trusted from {$requester}");
             return ['verified' => false, 'message' => 'Certificate not trusted', 'requester' => $requester];
         }
         
         // Step 2: Extract public key from certificate
         $publicKey = $this->extractPublicKeyFromCert($certificate);
         if (!$publicKey) {
+            error_log("CertificateManager: Cannot extract public key from certificate");
             return ['verified' => false, 'message' => 'Cannot extract public key', 'requester' => $requester];
         }
         
-        // Step 3: Prepare payload for verification (remove signature, certificate, requester)
+        // Step 3: Prepare payload for verification
+        // IMPORTANT: Remove signature, certificate, and requester before verification
         $payloadToVerify = $request;
         unset($payloadToVerify['signature']);
         unset($payloadToVerify['certificate']);
@@ -161,21 +186,70 @@ class CertificateManager
         $jsonToVerify = json_encode($payloadToVerify, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         $decodedSig = base64_decode($signature);
         
-        // Step 4: Verify signature
+        // Step 4: Verify signature using openssl
         $keyResource = openssl_pkey_get_public($publicKey);
         if (!$keyResource) {
+            error_log("CertificateManager: Invalid public key format");
             return ['verified' => false, 'message' => 'Invalid public key', 'requester' => $requester];
         }
         
         $result = openssl_verify($jsonToVerify, $decodedSig, $keyResource, OPENSSL_ALGO_SHA256);
         $isValid = ($result === 1);
         
-        error_log("CertificateManager: Request from {$requester} - Signature: " . ($isValid ? "VALID" : "INVALID"));
+        error_log("CertificateManager: Request from {$requester} - Signature: " . ($isValid ? "VALID ✓" : "INVALID ✗"));
+        
+        if ($result === -1) {
+            error_log("CertificateManager: OpenSSL error: " . openssl_error_string());
+        }
         
         return [
             'verified' => $isValid,
             'requester' => $requester,
             'message' => $isValid ? 'Signature verified' : 'Invalid signature'
         ];
+    }
+    
+    /**
+     * Create signed request with certificate (for outgoing)
+     * This is used when ZURUBANK sends requests to other institutions
+     */
+    public function createSignedRequest(array $payload, string $requester): array
+    {
+        if (!$this->myPrivateKey || !$this->myCertificate) {
+            error_log("CertificateManager: Cannot sign request - missing private key or certificate for {$this->myName}");
+            return $payload;
+        }
+        
+        // CRITICAL: Must match what VOUCHMORPH expects for verification
+        $timestamp = time();
+        $payloadWithTimestamp = array_merge($payload, ['timestamp' => $timestamp]);
+        ksort($payloadWithTimestamp);
+        
+        $jsonToSign = json_encode($payloadWithTimestamp, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        
+        error_log("CertificateManager: Signing payload for {$requester}: " . $jsonToSign);
+        
+        $signature = '';
+        $keyResource = openssl_pkey_get_private($this->myPrivateKey);
+        if (!$keyResource) {
+            error_log("CertificateManager: Failed to load private key for signing");
+            return $payload;
+        }
+        
+        $signResult = openssl_sign($jsonToSign, $signature, $keyResource, OPENSSL_ALGO_SHA256);
+        
+        if (!$signResult) {
+            error_log("CertificateManager: Failed to sign payload - " . openssl_error_string());
+            return $payload;
+        }
+        
+        $encodedSignature = base64_encode($signature);
+        error_log("CertificateManager: Generated signature length: " . strlen($encodedSignature));
+        
+        return array_merge($payloadWithTimestamp, [
+            'signature' => $encodedSignature,
+            'requester' => $requester,
+            'certificate' => $this->myCertificate
+        ]);
     }
 }
