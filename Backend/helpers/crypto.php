@@ -1,32 +1,26 @@
 <?php
 // zurubank/Backend/helpers/crypto.php
 
-function hash_token($token, $pin) {
-    return hash('sha256', $token . $pin);
-}
-
-function generate_auth_code() {
-    return random_int(100000, 999999);
-}
-
-function generate_trace() {
-    return uniqid("ZRUBNK");
-}
-
-// ============================================================
-// RSA SIGNATURE FUNCTIONS FOR BANK-TO-BANK TRUST
-// Uses RSA keys (asymmetric) - Same as Visa/Mastercard
-// trusted_partners table stores RSA PUBLIC KEYS
-// ============================================================
+require_once __DIR__ . '/CertificateManager.php';
 
 /**
- * Get public key for a requester from trusted_partners table
- * Used to verify incoming signatures from VouchMorph or other banks
+ * Get requester public key (now extracts from certificate)
+ * Matches SACCUSSALIS implementation
  */
 function get_requester_public_key($requester, $pdo)
 {
-    error_log("get_requester_public_key called for: {$requester}");
+    $input = json_decode(file_get_contents('php://input'), true);
     
+    if (isset($input['certificate'])) {
+        $certManager = new CertificateManager();
+        $publicKey = $certManager->extractPublicKeyFromCert($input['certificate']);
+        if ($publicKey) {
+            error_log("Extracted public key from certificate for {$requester}");
+            return $publicKey;
+        }
+    }
+    
+    // Legacy fallback - database lookup
     try {
         $stmt = $pdo->prepare("
             SELECT public_key 
@@ -39,32 +33,61 @@ function get_requester_public_key($requester, $pdo)
         $row = $stmt->fetch(PDO::FETCH_ASSOC);
         
         if ($row && !empty($row['public_key'])) {
-            error_log("Found RSA public key for {$requester} in trusted_partners table");
+            error_log("Found public key for {$requester} in trusted_partners table");
             return $row['public_key'];
         }
-        
-        error_log("No public key found for requester: {$requester}");
-        return null;
-        
     } catch (Exception $e) {
         error_log("Database error getting public key: " . $e->getMessage());
-        return null;
     }
+    
+    // Environment fallback
+    $envKeyName = strtoupper($requester) . '_PUBLIC_KEY';
+    $envKey = getenv($envKeyName);
+    if ($envKey) {
+        error_log("Using public key from env for {$requester}");
+        return str_replace(['\\n', '\n'], "\n", $envKey);
+    }
+    
+    error_log("No public key found for requester: {$requester}");
+    return null;
 }
 
 /**
- * Sign a payload with RSA private key
- * This proves the response came from Zurubank (non-repudiation)
+ * JSON canonicalization - used for VERIFYING signatures
+ * This matches what VOUCHMORPH uses to verify
+ * CRITICAL: Must match VOUCHMORPH's canonicalization exactly
+ */
+function canonicalize_payload(array $payload): string
+{
+    // For VERIFYING incoming requests - remove signature fields
+    unset($payload['signature']);
+    unset($payload['certificate']);
+    // Keep requester and timestamp for verification
+    ksort($payload);
+    return json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+}
+
+/**
+ * Sign payload for outgoing response
+ * CRITICAL: Must match exactly what VOUCHMORPH expects to verify
+ * Matches SACCUSSALIS implementation
  */
 function sign_payload($payload, $privateKey = null)
 {
     if (!$privateKey) {
-        // Get RSA private key from environment (Railway vault)
-        $privateKeyContent = getenv('ZURUBANK_PRIVATE_KEY');
+        $privateKeyContent = getenv('ZURUBANK_PRIVATE_KEY_CONTENT');
         if (!$privateKeyContent) {
-            error_log("ZURUBANK_PRIVATE_KEY not found in environment");
+            error_log("ZURUBANK_PRIVATE_KEY_CONTENT not found");
             return null;
         }
+        $privateKeyContent = str_replace(['\\n', '\n'], "\n", $privateKeyContent);
+        
+        if (strpos($privateKeyContent, '-----BEGIN PRIVATE KEY-----') === false) {
+            $privateKeyContent = "-----BEGIN PRIVATE KEY-----\n" . 
+                                 chunk_split(trim($privateKeyContent), 64, "\n") . 
+                                 "-----END PRIVATE KEY-----\n";
+        }
+        
         $privateKey = openssl_pkey_get_private($privateKeyContent);
         if (!$privateKey) {
             error_log("Failed to load private key: " . openssl_error_string());
@@ -72,46 +95,73 @@ function sign_payload($payload, $privateKey = null)
         }
     }
     
+    // CRITICAL: VOUCHMORPH expects timestamp to be included in the signed payload
     $timestamp = time();
-    $payloadWithTimestamp = array_merge($payload, ['_timestamp' => $timestamp]);
-    $payloadJson = json_encode($payloadWithTimestamp);
+    $payloadWithTimestamp = array_merge($payload, ['timestamp' => $timestamp]);
     
-    // Generate RSA signature
+    // CRITICAL: VOUCHMORPH uses ksort before verification
+    ksort($payloadWithTimestamp);
+    
+    // CRITICAL: Must use EXACT same JSON encoding as VOUCHMORPH
+    $payloadJson = json_encode($payloadWithTimestamp, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    
+    error_log("ZURUBANK: Signing payload: " . $payloadJson);
+    
     $signature = '';
-    $success = openssl_sign($payloadJson, $signature, $privateKey, OPENSSL_ALGO_SHA256);
+    $signResult = openssl_sign($payloadJson, $signature, $privateKey, OPENSSL_ALGO_SHA256);
     
-    if (!$success) {
-        error_log("Failed to sign payload: " . openssl_error_string());
+    if (!$signResult) {
+        error_log("ZURUBANK: Failed to sign payload - " . openssl_error_string());
         return null;
     }
     
+    $encodedSignature = base64_encode($signature);
+    error_log("ZURUBANK: Generated signature length: " . strlen($encodedSignature));
+    
     return [
-        'signature' => base64_encode($signature),
-        'timestamp' => $timestamp,
-        'signed_payload' => $payloadWithTimestamp
+        'signature' => $encodedSignature,
+        'timestamp' => $timestamp
     ];
 }
 
 /**
- * Send a signed JSON response using RSA
- * Use this for all responses that other banks need to trust
+ * Send signed response with certificate
+ * Matches SACCUSSALIS implementation
  */
 function send_signed_response($payload, $httpCode = 200)
 {
+    // Sign the payload
     $signed = sign_payload($payload);
     
     if (!$signed) {
-        // Fallback to unsigned response if signing fails
-        error_log("WARNING: Sending unsigned response due to signing failure");
+        error_log("ZURUBANK: Failed to sign response - sending unsigned");
         http_response_code($httpCode);
         echo json_encode($payload);
         exit;
     }
     
+    // Get certificate
+    $certContent = getenv('ZURUBANK_CERT_CONTENT');
+    if ($certContent) {
+        $certContent = str_replace(['\\n', '\n'], "\n", $certContent);
+        error_log("ZURUBANK: Certificate loaded, length: " . strlen($certContent));
+    } else {
+        error_log("ZURUBANK: WARNING - No certificate content found in environment");
+    }
+    
+    // Build response exactly as VOUCHMORPH expects
     $response = array_merge($payload, [
         'signature' => $signed['signature'],
-        'timestamp' => $signed['timestamp']
+        'timestamp' => $signed['timestamp'],
+        'certificate' => $certContent
     ]);
+    
+    // Log the response structure (without full cert for brevity)
+    $logResponse = $response;
+    if (isset($logResponse['certificate'])) {
+        $logResponse['certificate'] = '[CERTIFICATE LENGTH: ' . strlen($logResponse['certificate']) . ']';
+    }
+    error_log("ZURUBANK: Sending signed response: " . json_encode($logResponse));
     
     http_response_code($httpCode);
     echo json_encode($response);
@@ -119,81 +169,143 @@ function send_signed_response($payload, $httpCode = 200)
 }
 
 /**
- * Verify an incoming RSA signature from another institution
- * Used when receiving requests from VouchMorph or other banks
- */
-function verify_signature($payload, $signature, $publicKey, $timestamp = null, $maxAgeSeconds = 300)
-{
-    // Prevent replay attacks (like Visa does)
-    if ($timestamp && abs(time() - $timestamp) > $maxAgeSeconds) {
-        error_log("Signature rejected: timestamp too old (age: " . abs(time() - $timestamp) . "s)");
-        return false;
-    }
-    
-    // If timestamp was in the payload, include it for verification
-    if ($timestamp) {
-        $payloadToVerify = array_merge($payload, ['_timestamp' => $timestamp]);
-    } else {
-        $payloadToVerify = $payload;
-    }
-    
-    $payloadJson = json_encode($payloadToVerify);
-    
-    // Verify RSA signature using openssl
-    $result = openssl_verify(
-        $payloadJson,
-        base64_decode($signature),
-        $publicKey,
-        OPENSSL_ALGO_SHA256
-    );
-    
-    $isValid = ($result === 1);
-    error_log("RSA Signature verification: " . ($isValid ? "VALID ✓" : "INVALID ✗"));
-    
-    if ($result === -1) {
-        error_log("Signature verification error: " . openssl_error_string());
-    }
-    
-    return $isValid;
-}
-
-/**
- * Verify incoming request signature from requester (wrapper for verify_signature)
- * This is called by verify_asset.php, hold.php, etc.
+ * Verify incoming request signature from requester
+ * Matches SACCUSSALIS implementation
  */
 function verify_requester_signature($input, $pdo)
 {
     $signature = $input['signature'] ?? null;
     $timestamp = $input['timestamp'] ?? null;
     $requester = $input['requester'] ?? 'VOUCHMORPH';
+    $certificate = $input['certificate'] ?? null;
     
-    // Extract the actual payload (without signature and timestamp)
+    if (!$signature) {
+        error_log("ZURUBANK: Missing signature from {$requester}");
+        return ['valid' => false, 'message' => 'Missing signature'];
+    }
+    
+    // If certificate is provided, use CertificateManager (bank-grade trust)
+    if ($certificate) {
+        $certManager = new CertificateManager();
+        
+        // Verify the certificate is valid and signed by trusted CA
+        if (!$certManager->verifyCertificate($certificate)) {
+            error_log("ZURUBANK: Invalid certificate from {$requester}");
+            return ['valid' => false, 'message' => 'Invalid certificate'];
+        }
+        
+        // Extract public key from certificate
+        $publicKey = $certManager->extractPublicKeyFromCert($certificate);
+        if (!$publicKey) {
+            error_log("ZURUBANK: Cannot extract public key from certificate");
+            return ['valid' => false, 'message' => 'Cannot extract public key'];
+        }
+        
+        // Build payload for verification (remove signature, certificate, keep timestamp)
+        $payloadToVerify = [];
+        foreach ($input as $key => $value) {
+            if (!in_array($key, ['signature', 'certificate'])) {
+                $payloadToVerify[$key] = $value;
+            }
+        }
+        
+        // CRITICAL: Must use same canonicalization as VOUCHMORPH
+        ksort($payloadToVerify);
+        $jsonToVerify = json_encode($payloadToVerify, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        $decodedSig = base64_decode($signature);
+        
+        $keyResource = openssl_pkey_get_public($publicKey);
+        $result = openssl_verify($jsonToVerify, $decodedSig, $keyResource, OPENSSL_ALGO_SHA256);
+        $isValid = ($result === 1);
+        
+        error_log("ZURUBANK: Certificate verification from {$requester} - Signature: " . ($isValid ? "VALID ✓" : "INVALID ✗"));
+        
+        if ($isValid) {
+            return ['valid' => true, 'message' => 'Certificate verified', 'requester' => $requester];
+        } else {
+            return ['valid' => false, 'message' => 'Invalid signature'];
+        }
+    }
+    
+    // Fallback: Get public key from database or env (legacy)
+    $publicKey = get_requester_public_key($requester, $pdo);
+    
+    if (!$publicKey) {
+        error_log("ZURUBANK: No public key found for requester: {$requester}");
+        return ['valid' => false, 'message' => "No public key found for {$requester}"];
+    }
+    
+    // Build payload for verification
     $payloadToVerify = [];
     foreach ($input as $key => $value) {
-        if (!in_array($key, ['signature', 'timestamp', '_timestamp'])) {
+        if (!in_array($key, ['signature', 'certificate', 'timestamp', '_timestamp'])) {
             $payloadToVerify[$key] = $value;
         }
     }
     
-    if (!$signature) {
-        error_log("Missing signature from {$requester}");
-        return ['valid' => false, 'message' => 'Missing signature'];
+    // If timestamp was in payload (not removed), include it
+    if ($timestamp && !isset($payloadToVerify['timestamp'])) {
+        $payloadToVerify['timestamp'] = $timestamp;
     }
     
-    $publicKey = get_requester_public_key($requester, $pdo);
+    ksort($payloadToVerify);
+    $jsonToVerify = json_encode($payloadToVerify, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    $decodedSig = base64_decode($signature);
     
-    if (!$publicKey) {
-        error_log("No public key found for requester: {$requester}");
-        return ['valid' => false, 'message' => "No public key found for {$requester}"];
+    $keyResource = openssl_pkey_get_public($publicKey);
+    $result = openssl_verify($jsonToVerify, $decodedSig, $keyResource, OPENSSL_ALGO_SHA256);
+    $isValid = ($result === 1);
+    
+    error_log("ZURUBANK: Signature verification from {$requester}: " . ($isValid ? "VALID ✓" : "INVALID ✗"));
+    
+    if ($result === -1) {
+        error_log("ZURUBANK: Signature verification error: " . openssl_error_string());
     }
     
-    $isValid = verify_signature($payloadToVerify, $signature, $publicKey, $timestamp);
-    
-    if (!$isValid) {
-        error_log("Invalid signature from {$requester}");
-        return ['valid' => false, 'message' => 'Invalid signature'];
+    return [
+        'valid' => $isValid,
+        'message' => $isValid ? 'Signature verified' : 'Invalid signature',
+        'requester' => $requester
+    ];
+}
+
+/**
+ * Helper: Verify and get authenticated requester
+ * Use this at the start of all API endpoints
+ */
+function authenticate_request($pdo, $requiredRole = null)
+{
+    $input = json_decode(file_get_contents('php://input'), true);
+    if (!$input) {
+        $input = $_POST;
     }
     
-    error_log("Signature verified from {$requester}");
-    return ['valid' => true, 'message' => 'Signature verified'];
+    $verification = verify_requester_signature($input, $pdo);
+    
+    if (!$verification['valid']) {
+        send_signed_response([
+            'success' => false,
+            'error' => $verification['message'],
+            'verified' => false
+        ], 401);
+        exit;
+    }
+    
+    return $verification['requester'];
+}
+
+// ============================================================
+// UTILITY FUNCTIONS (preserved from original)
+// ============================================================
+
+function hash_token($token, $pin) {
+    return hash('sha256', $token . $pin);
+}
+
+function generate_auth_code() {
+    return random_int(100000, 999999);
+}
+
+function generate_trace() {
+    return uniqid("ZRUBNK");
 }
