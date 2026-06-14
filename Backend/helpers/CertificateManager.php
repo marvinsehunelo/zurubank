@@ -138,9 +138,12 @@ class CertificateManager
         exec($expiryCmd, $expiryOutput);
         foreach ($expiryOutput as $line) {
             if (preg_match('/notAfter=(.*)/', $line, $matches)) {
-                $expiryDate = strtotime($matches);
-                if ($expiryDate < time()) {
-                    error_log("CertificateManager: Certificate has expired");
+                // CRITICAL FIX: Cast string target explicitly from match capture group
+                $dateString = trim((string)$matches);
+                $expiryDate = strtotime($dateString);
+                
+                if ($expiryDate === false || $expiryDate < time()) {
+                    error_log("CertificateManager: Certificate has expired or has an invalid date structure");
                     $result = false;
                 }
             }
