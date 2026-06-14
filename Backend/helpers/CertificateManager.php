@@ -22,7 +22,10 @@ class CertificateManager
         // Load CA certificate (trust anchor)
         $caContent = getenv('VOUCHMORPH_CA_CERT_CONTENT');
         if ($caContent) {
-            $this->caCert = str_replace(['\\n', '\n'], "\n", $caContent);
+            if (is_array($caContent)) {
+                $caContent = reset($caContent);
+            }
+            $this->caCert = str_replace(['\\n', '\n'], "\n", (string)$caContent);
             error_log("CertificateManager: CA certificate loaded for {$this->myName}");
         } else {
             error_log("CertificateManager: WARNING - No CA certificate found for {$this->myName}");
@@ -31,11 +34,16 @@ class CertificateManager
         // Load this member's private key
         $privateKeyContent = getenv($this->myName . '_PRIVATE_KEY_CONTENT');
         if ($privateKeyContent) {
-            // Replace literal markers with real newlines
+            // CRITICAL: Type guard against environment arrays or structures
+            if (is_array($privateKeyContent)) {
+                $privateKeyContent = reset($privateKeyContent);
+            }
+            
+            $privateKeyContent = (string)$privateKeyContent;
             $privateKeyContent = str_replace(['\\n', '\n'], "\n", $privateKeyContent);
             $privateKeyContent = trim($privateKeyContent);
             
-            // CRITICAL: Format raw base64 or broken PEM into an OpenSSL-compliant key block
+            // Format raw content safely into an OpenSSL-compliant key block
             if (strpos($privateKeyContent, '-----BEGIN') === false) {
                 error_log("CertificateManager: Raw key detected. Applying standard headers.");
                 $privateKeyContent = "-----BEGIN PRIVATE KEY-----\n" . 
@@ -45,7 +53,7 @@ class CertificateManager
                 // Ensure existing PEM structural chunks have clean 64-character line breaks
                 preg_match('/-----BEGIN (.*?)-----\s+(.*?)\s+-----END \\1-----/s', $privateKeyContent, $matches);
                 if (isset($matches)) {
-                    $body = preg_replace('/\s+/', '', $matches);
+                    $body = preg_replace('/\s+/', '', (string)$matches);
                     $privateKeyContent = "-----BEGIN {$matches}-----\n" . 
                                          chunk_split($body, 64, "\n") . 
                                          "-----END {$matches}-----\n";
@@ -61,7 +69,10 @@ class CertificateManager
         // Load this member's certificate
         $certContent = getenv($this->myName . '_CERT_CONTENT');
         if ($certContent) {
-            $this->myCertificate = str_replace(['\\n', '\n'], "\n", $certContent);
+            if (is_array($certContent)) {
+                $certContent = reset($certContent);
+            }
+            $this->myCertificate = str_replace(['\\n', '\n'], "\n", (string)$certContent);
             error_log("CertificateManager: Certificate loaded for {$this->myName}");
         } else {
             error_log("CertificateManager: WARNING - No certificate found for {$this->myName}");
