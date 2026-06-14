@@ -5,17 +5,50 @@ require_once __DIR__ . '/CertificateManager.php';
 
 /**
  * Sign payload for outgoing response
- * Uses the private key string directly (like SACCUSSALIS)
  */
 function sign_payload($payload, $privateKey = null)
 {
     if (!$privateKey) {
         $certManager = new CertificateManager();
-        $privateKey = $certManager->myPrivateKey;  // Direct property access
-        if (!$privateKey) {
+        $privateKeyString = $certManager->myPrivateKey;
+        
+        if (!$privateKeyString) {
             error_log("ZURUBANK: No private key available for signing");
             return null;
         }
+        
+        // Clean the private key - ensure proper format
+        $privateKeyString = trim($privateKeyString);
+        $privateKeyString = str_replace(['\\n', '\n', '\r'], "\n", $privateKeyString);
+        
+        // Ensure it has proper PEM headers
+        if (strpos($privateKeyString, '-----BEGIN PRIVATE KEY-----') === false && 
+            strpos($privateKeyString, '-----BEGIN RSA PRIVATE KEY-----') === false) {
+            // If no headers, assume it's raw base64 and add PKCS#8 headers
+            $privateKeyString = "-----BEGIN PRIVATE KEY-----\n" . 
+                                chunk_split($privateKeyString, 64, "\n") . 
+                                "-----END PRIVATE KEY-----\n";
+            error_log("ZURUBANK: Added PEM headers to private key");
+        }
+        
+        // Ensure proper line endings (Unix style)
+        $privateKeyString = str_replace("\r", "", $privateKeyString);
+        
+        // Load the private key
+        $privateKey = openssl_pkey_get_private($privateKeyString);
+        
+        if (!$privateKey) {
+            // Try PKCS#1 format
+            $pkcs1Key = str_replace('-----BEGIN PRIVATE KEY-----', '-----BEGIN RSA PRIVATE KEY-----', $privateKeyString);
+            $pkcs1Key = str_replace('-----END PRIVATE KEY-----', '-----END RSA PRIVATE KEY-----', $pkcs1Key);
+            $privateKey = openssl_pkey_get_private($pkcs1Key);
+            
+            if (!$privateKey) {
+                error_log("ZURUBANK: Failed to load private key: " . openssl_error_string());
+                return null;
+            }
+        }
+        error_log("ZURUBANK: Private key loaded successfully as resource");
     }
     
     $timestamp = time();
@@ -27,13 +60,7 @@ function sign_payload($payload, $privateKey = null)
     error_log("ZURUBANK: Signing payload length: " . strlen($payloadJson));
     
     $signature = '';
-    $keyResource = openssl_pkey_get_private($privateKey);
-    if (!$keyResource) {
-        error_log("ZURUBANK: Failed to load private key resource: " . openssl_error_string());
-        return null;
-    }
-    
-    $signResult = openssl_sign($payloadJson, $signature, $keyResource, OPENSSL_ALGO_SHA256);
+    $signResult = openssl_sign($payloadJson, $signature, $privateKey, OPENSSL_ALGO_SHA256);
     
     if (!$signResult) {
         error_log("ZURUBANK: Failed to sign payload - " . openssl_error_string());
@@ -69,20 +96,22 @@ function send_signed_response($payload, $httpCode = 200)
         header('Content-Type: application/json');
         http_response_code(500);
         echo json_encode([
-            'success' => false,
+            'status' => 'ERROR',
+            'token_generated' => false,
             'error' => 'Failed to sign response'
         ]);
         exit;
     }
     
-    // Get certificate directly from property
+    // Get certificate
     $certContent = $certManager->myCertificate;
     if (!$certContent) {
         error_log("ZURUBANK: No certificate available");
         header('Content-Type: application/json');
         http_response_code(500);
         echo json_encode([
-            'success' => false,
+            'status' => 'ERROR',
+            'token_generated' => false,
             'error' => 'No certificate available'
         ]);
         exit;
@@ -95,11 +124,6 @@ function send_signed_response($payload, $httpCode = 200)
         'certificate' => $certContent
     ]);
     
-    // Log the response structure (without full cert for brevity)
-    $logResponse = $response;
-    if (isset($logResponse['certificate'])) {
-        $logResponse['certificate'] = '[CERTIFICATE LENGTH: ' . strlen($logResponse['certificate']) . ']';
-    }
     error_log("ZURUBANK: Sending signed response");
     
     header('Content-Type: application/json');
@@ -185,6 +209,7 @@ function authenticate_request($pdo, $requiredRole = null)
     
     if (!$verification['valid']) {
         send_signed_response([
+            'status' => 'ERROR',
             'success' => false,
             'error' => $verification['message'],
             'verified' => false
