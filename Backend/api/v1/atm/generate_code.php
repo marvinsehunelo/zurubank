@@ -126,7 +126,7 @@ try {
         }
     }
 
-    // Create tables if not exists (with enhanced columns)
+    // Create tables if not exists (with enhanced columns - NO updated_at)
     $pdo->exec("
         CREATE TABLE IF NOT EXISTS instant_money_vouchers (
             voucher_id SERIAL PRIMARY KEY,
@@ -139,7 +139,6 @@ try {
             status VARCHAR(20) DEFAULT 'active',
             holding_account VARCHAR(50),
             created_at TIMESTAMP DEFAULT NOW(),
-            updated_at TIMESTAMP DEFAULT NOW(),
             reference VARCHAR(255),
             external_reference VARCHAR(255),
             source_institution VARCHAR(100),
@@ -164,7 +163,6 @@ try {
             instructions TEXT,
             expires_at TIMESTAMP NOT NULL,
             created_at TIMESTAMP DEFAULT NOW(),
-            updated_at TIMESTAMP DEFAULT NOW(),
             reference VARCHAR(255),
             source_institution VARCHAR(100),
             requester VARCHAR(100),
@@ -183,7 +181,7 @@ try {
     // Generate auth code
     $authCode = str_pad(random_int(0, 99999999), 8, '0', STR_PAD_LEFT);
 
-    // Insert into instant_money_vouchers
+    // Insert into instant_money_vouchers (NO updated_at)
     $stmt = $pdo->prepare("
         INSERT INTO instant_money_vouchers (
             amount,
@@ -195,7 +193,6 @@ try {
             status,
             holding_account,
             created_at,
-            updated_at,
             reference,
             external_reference,
             source_institution,
@@ -216,7 +213,6 @@ try {
             :expires_at,
             'active',
             'VOUCHER-SUSPENSE',
-            NOW(),
             NOW(),
             :reference,
             :external_reference,
@@ -290,7 +286,6 @@ try {
             instructions,
             expires_at,
             created_at,
-            updated_at,
             reference,
             source_institution,
             requester,
@@ -305,7 +300,6 @@ try {
             :recipient_phone,
             :instructions,
             :expires_at,
-            NOW(),
             NOW(),
             :reference,
             :source_institution,
