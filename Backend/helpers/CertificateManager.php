@@ -11,7 +11,7 @@
 class CertificateManager
 {
     private ?string $caCert = null;
-    private $myPrivateKey = null;  // Changed from ?string to store resource
+    private $myPrivateKey = null;  // Store as resource
     private ?string $myCertificate = null;
     private ?string $myName = null;
     
@@ -28,15 +28,11 @@ class CertificateManager
             error_log("CertificateManager: WARNING - No CA certificate found for {$this->myName}");
         }
         
-        // Load this member's private key
-        $privateKeyContent = getenv($this->myName . '_PRIVATE_KEY_CONTENT');
-        if (!$privateKeyContent) {
-            $privateKeyContent = getenv($this->myName . '_PRIVATE_KEY');
-        }
+        // Load this member's private key - try multiple environment variable names
+        $privateKeyContent = $this->getPrivateKeyFromEnv();
         
         if ($privateKeyContent) {
-            $normalizedKey = $this->normalizePemContent($privateKeyContent);
-            $this->myPrivateKey = $this->loadPrivateKey($normalizedKey);
+            $this->myPrivateKey = $this->loadPrivateKey($privateKeyContent);
             if ($this->myPrivateKey) {
                 error_log("CertificateManager: Private key loaded successfully for {$this->myName}");
             } else {
@@ -47,10 +43,7 @@ class CertificateManager
         }
         
         // Load this member's certificate
-        $certContent = getenv($this->myName . '_CERT_CONTENT');
-        if (!$certContent) {
-            $certContent = getenv($this->myName . '_CERT');
-        }
+        $certContent = $this->getCertificateFromEnv();
         
         if ($certContent) {
             $this->myCertificate = $this->normalizePemContent($certContent);
@@ -61,37 +54,99 @@ class CertificateManager
     }
     
     /**
-     * Normalize PEM content - FIX for long keys
-     * Ensures proper line breaks and removes any corruption
+     * Get private key from environment (supports multiple formats)
+     */
+    private function getPrivateKeyFromEnv(): ?string
+    {
+        // Try different possible environment variable names
+        $possibleNames = [
+            $this->myName . '_PRIVATE_KEY_CONTENT',
+            $this->myName . '_PRIVATE_KEY',
+            'ZURUBANK_PRIVATE_KEY',
+            'ZURUBANK_PRIVATE_KEY_BASE64',
+            'PRIVATE_KEY'
+        ];
+        
+        foreach ($possibleNames as $name) {
+            $value = getenv($name);
+            if ($value) {
+                error_log("CertificateManager: Found private key in env: {$name}");
+                
+                // Check if it's base64 encoded (usually a single line without BEGIN/END)
+                if ($name === 'ZURUBANK_PRIVATE_KEY_BASE64' || (strpos($value, '-----BEGIN') === false && strlen($value) > 100)) {
+                    error_log("CertificateManager: Decoding base64 private key");
+                    $decoded = base64_decode($value);
+                    if ($decoded && strpos($decoded, 'BEGIN') !== false) {
+                        return $decoded;
+                    }
+                }
+                
+                return $value;
+            }
+        }
+        
+        return null;
+    }
+    
+    /**
+     * Get certificate from environment
+     */
+    private function getCertificateFromEnv(): ?string
+    {
+        $possibleNames = [
+            $this->myName . '_CERT_CONTENT',
+            $this->myName . '_CERT',
+            'ZURUBANK_CERT',
+            'ZURUBANK_CERT_BASE64',
+            'CERTIFICATE'
+        ];
+        
+        foreach ($possibleNames as $name) {
+            $value = getenv($name);
+            if ($value) {
+                error_log("CertificateManager: Found certificate in env: {$name}");
+                
+                // Check if it's base64 encoded
+                if ($name === 'ZURUBANK_CERT_BASE64' || (strpos($value, '-----BEGIN') === false && strlen($value) > 100)) {
+                    $decoded = base64_decode($value);
+                    if ($decoded && strpos($decoded, 'BEGIN') !== false) {
+                        return $decoded;
+                    }
+                }
+                
+                return $value;
+            }
+        }
+        
+        return null;
+    }
+    
+    /**
+     * Normalize PEM content - ensures proper line breaks
      */
     private function normalizePemContent(string $content): string
     {
         // First, replace any escaped newlines
-        $content = str_replace(['\\n', '\n', '\\r', '\r'], "\n", $content);
+        $content = str_replace(['\\n', '\\r', '\r'], "\n", $content);
         
-        // Remove any carriage returns
+        // Remove any Windows line endings
         $content = str_replace("\r", "", $content);
         
         // Trim whitespace
         $content = trim($content);
         
-        // Check if it's a valid PEM format
-        if (preg_match('/-----BEGIN (.*?)-----/', $content, $matches)) {
-            // Extract the PEM type
-            $pemType = $matches[1];
+        // Check if it's already in PEM format
+        if (preg_match('/-----BEGIN (.*?)-----/', $content)) {
+            // Ensure proper line breaks after headers and footers
+            $content = preg_replace('/-----BEGIN [^-]+-----/', "$0\n", $content);
+            $content = preg_replace('/-----END [^-]+-----/', "\n$0\n", $content);
             
-            // Extract body between BEGIN and END
-            preg_match('/-----BEGIN ' . preg_quote($pemType) . '-----(.*?)-----END ' . preg_quote($pemType) . '-----/s', $content, $bodyMatches);
-            
-            if (isset($bodyMatches[1])) {
-                // Remove all whitespace from the body
-                $body = preg_replace('/\s/', '', $bodyMatches[1]);
-                
-                // Re-chunk into 64-character lines
-                $chunkedBody = chunk_split($body, 64, "\n");
-                
-                // Rebuild the PEM
-                $content = "-----BEGIN {$pemType}-----\n" . trim($chunkedBody) . "\n-----END {$pemType}-----\n";
+            // Ensure body lines are 64 chars
+            preg_match('/-----BEGIN (.*?)-----\n(.*?)\n-----END \\1-----/s', $content, $matches);
+            if (isset($matches[2])) {
+                $body = preg_replace('/\s/', '', $matches[2]);
+                $chunked = chunk_split($body, 64, "\n");
+                $content = "-----BEGIN {$matches[1]}-----\n" . trim($chunked) . "\n-----END {$matches[1]}-----\n";
             }
         }
         
@@ -99,76 +154,81 @@ class CertificateManager
     }
     
     /**
-     * Load private key with multiple attempts for different formats
+     * Load private key with OpenSSL 3.x compatibility
      */
     private function loadPrivateKey(string $keyContent)
     {
-        // Log first few chars for debugging
-        error_log("CertificateManager: Private key starts with: " . substr($keyContent, 0, 50));
+        // First, normalize the content
+        $keyContent = $this->normalizePemContent($keyContent);
+        
         error_log("CertificateManager: Private key length: " . strlen($keyContent));
+        error_log("CertificateManager: Private key first 50 chars: " . substr($keyContent, 0, 50));
         
-        // Attempt 1: Direct load as is
-        $key = openssl_pkey_get_private($keyContent);
-        if ($key) {
-            error_log("CertificateManager: Private key loaded (direct)");
-            return $key;
-        }
-        error_log("CertificateManager: Direct load failed: " . openssl_error_string());
-        
-        // Attempt 2: Try with explicit null passphrase
-        $key = openssl_pkey_get_private($keyContent, null);
-        if ($key) {
-            error_log("CertificateManager: Private key loaded (null passphrase)");
-            return $key;
+        // Check if it's a proper PEM format
+        if (strpos($keyContent, '-----BEGIN') === false) {
+            error_log("CertificateManager: Key missing PEM headers - adding them");
+            // Assume it's raw base64 without headers
+            $keyContent = "-----BEGIN PRIVATE KEY-----\n" . 
+                          chunk_split(trim($keyContent), 64, "\n") . 
+                          "-----END PRIVATE KEY-----\n";
         }
         
-        // Attempt 3: Try as RSA private key (convert PKCS#8 to PKCS#1)
-        $rsaKey = str_replace('-----BEGIN PRIVATE KEY-----', '-----BEGIN RSA PRIVATE KEY-----', $keyContent);
-        $rsaKey = str_replace('-----END PRIVATE KEY-----', '-----END RSA PRIVATE KEY-----', $rsaKey);
-        $key = openssl_pkey_get_private($rsaKey);
-        if ($key) {
-            error_log("CertificateManager: Private key loaded (RSA format)");
-            return $key;
+        // Try direct load first (PKCS#8 format)
+        $privateKey = openssl_pkey_get_private($keyContent);
+        if ($privateKey) {
+            error_log("CertificateManager: Private key loaded as PKCS#8");
+            return $privateKey;
         }
         
-        // Attempt 4: Try with OpenSSL command line conversion
-        $tempKey = tempnam(sys_get_temp_dir(), 'key_');
-        file_put_contents($tempKey, $keyContent);
+        $error1 = openssl_error_string();
+        error_log("CertificateManager: PKCS#8 load failed: " . $error1);
         
-        // Try to convert to PKCS#1
-        $cmd = "openssl rsa -in " . escapeshellarg($tempKey) . " -out " . escapeshellarg($tempKey . '.pem') . " 2>&1";
+        // Try as PKCS#1 (RSA PRIVATE KEY)
+        $pkcs1Key = str_replace('-----BEGIN PRIVATE KEY-----', '-----BEGIN RSA PRIVATE KEY-----', $keyContent);
+        $pkcs1Key = str_replace('-----END PRIVATE KEY-----', '-----END RSA PRIVATE KEY-----', $pkcs1Key);
+        
+        $privateKey = openssl_pkey_get_private($pkcs1Key);
+        if ($privateKey) {
+            error_log("CertificateManager: Private key loaded as PKCS#1 (RSA)");
+            return $privateKey;
+        }
+        
+        $error2 = openssl_error_string();
+        error_log("CertificateManager: PKCS#1 load failed: " . $error2);
+        
+        // Try using openssl command line to convert and fix the key
+        $tempFile = tempnam(sys_get_temp_dir(), 'zurukey_');
+        file_put_contents($tempFile, $keyContent);
+        
+        // Try to convert PKCS#8 to PKCS#1
+        $cmd = "openssl rsa -in " . escapeshellarg($tempFile) . " -out " . escapeshellarg($tempFile . '_conv') . " 2>&1";
         exec($cmd, $output, $returnCode);
         
-        if ($returnCode === 0 && file_exists($tempKey . '.pem')) {
-            $convertedKey = file_get_contents($tempKey . '.pem');
-            $key = openssl_pkey_get_private($convertedKey);
-            if ($key) {
-                error_log("CertificateManager: Private key loaded (converted via openssl)");
-                unlink($tempKey);
-                unlink($tempKey . '.pem');
-                return $key;
+        if ($returnCode === 0 && file_exists($tempFile . '_conv')) {
+            $converted = file_get_contents($tempFile . '_conv');
+            $privateKey = openssl_pkey_get_private($converted);
+            if ($privateKey) {
+                error_log("CertificateManager: Private key loaded after openssl conversion");
+                unlink($tempFile);
+                unlink($tempFile . '_conv');
+                return $privateKey;
             }
         }
         
-        // Attempt 5: Try to extract from PKCS#12 if it's in that format
-        $cmd = "openssl pkcs12 -in " . escapeshellarg($tempKey) . " -nocerts -nodes -passin pass: 2>&1";
+        // Try to extract public key to verify it's at least valid
+        $cmd = "openssl rsa -in " . escapeshellarg($tempFile) . " -pubout -out " . escapeshellarg($tempFile . '_pub') . " 2>&1";
         exec($cmd, $output, $returnCode);
-        if ($returnCode === 0 && !empty($output)) {
-            $extractedKey = implode("\n", $output);
-            $key = openssl_pkey_get_private($extractedKey);
-            if ($key) {
-                error_log("CertificateManager: Private key loaded (extracted from PKCS#12)");
-                unlink($tempKey);
-                return $key;
-            }
+        if ($returnCode === 0) {
+            error_log("CertificateManager: Private key file is valid (can extract public key)");
+        } else {
+            error_log("CertificateManager: Private key file validation failed: " . implode("\n", $output));
         }
         
-        unlink($tempKey);
+        unlink($tempFile);
+        if (file_exists($tempFile . '_conv')) unlink($tempFile . '_conv');
+        if (file_exists($tempFile . '_pub')) unlink($tempFile . '_pub');
         
-        // Log the final error
-        $errorMsg = openssl_error_string();
-        error_log("CertificateManager: All private key loading attempts failed. Last error: " . ($errorMsg ?: 'Unknown'));
-        
+        error_log("CertificateManager: All private key loading attempts failed");
         return null;
     }
     
@@ -197,23 +257,18 @@ class CertificateManager
     }
     
     /**
-     * Get private key as PEM string (if needed)
-     */
-    public function getMyPrivateKeyAsString(): ?string
-    {
-        if ($this->myPrivateKey) {
-            openssl_pkey_export($this->myPrivateKey, $output);
-            return $output;
-        }
-        return null;
-    }
-    
-    /**
      * Check if CertificateManager is properly configured
      */
     public function isConfigured(): bool
     {
-        return ($this->caCert !== null && $this->myPrivateKey !== null && $this->myCertificate !== null);
+        $configured = ($this->caCert !== null && $this->myPrivateKey !== null && $this->myCertificate !== null);
+        error_log("CertificateManager: isConfigured = " . ($configured ? "YES" : "NO"));
+        if (!$configured) {
+            error_log("CertificateManager: caCert: " . ($this->caCert ? "YES" : "NO"));
+            error_log("CertificateManager: myPrivateKey: " . ($this->myPrivateKey ? "YES" : "NO"));
+            error_log("CertificateManager: myCertificate: " . ($this->myCertificate ? "YES" : "NO"));
+        }
+        return $configured;
     }
     
     /**
@@ -285,7 +340,6 @@ class CertificateManager
     
     /**
      * Verify a signed request using certificate
-     * This matches what VOUCHMORPH does for verification
      */
     public function verifySignedRequest(array $request): array
     {
@@ -358,14 +412,11 @@ class CertificateManager
     
     /**
      * Create signed request with certificate (for outgoing)
-     * This is used when ZURUBANK sends requests to other institutions
      */
     public function createSignedRequest(array $payload, string $requester): array
     {
         if (!$this->myPrivateKey || !$this->myCertificate) {
             error_log("CertificateManager: Cannot sign request - missing private key or certificate for {$this->myName}");
-            error_log("CertificateManager: myPrivateKey: " . ($this->myPrivateKey ? "YES" : "NO"));
-            error_log("CertificateManager: myCertificate: " . ($this->myCertificate ? "YES" : "NO"));
             return $payload;
         }
         
