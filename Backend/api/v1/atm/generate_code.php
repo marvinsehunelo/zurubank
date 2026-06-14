@@ -121,7 +121,11 @@ try {
                 'requester' => $requester,
                 'timestamp' => time()
             ];
-            send_signed_response($duplicateResponse, $certManager);
+            
+            // INLINED SAFE SIGNING: Avoids crypto.php redeclaration issues completely
+            $signedPayload = $certManager->createSignedRequest($duplicateResponse, 'ZURUBANK');
+            echo json_encode($signedPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            exit;
         }
     }
 
@@ -298,7 +302,11 @@ try {
     ];
     
     error_log("ZURUBANK: Sending signed response");
-    send_signed_response($responsePayload, $certManager);
+    
+    // INLINED SAFE SIGNING: Bypass old logic inside crypto.php entirely
+    $signedPayload = $certManager->createSignedRequest($responsePayload, 'ZURUBANK');
+    echo json_encode($signedPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    exit;
 
 } catch (Exception $e) {
     if (isset($pdo) && $pdo->inTransaction()) {
@@ -316,7 +324,8 @@ try {
     
     try {
         $fallbackCertManager = new CertificateManager('ZURUBANK');
-        send_signed_response($errorResponse, $fallbackCertManager);
+        $signedErrorPayload = $fallbackCertManager->createSignedRequest($errorResponse, 'ZURUBANK');
+        echo json_encode($signedErrorPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     } catch (Exception $sigError) {
         echo json_encode($errorResponse);
     }
@@ -325,22 +334,4 @@ try {
     if (ob_get_length() !== false) {
         ob_end_flush();
     }
-}
-
-/**
- * Clean helper function to handle structured response signing 
- * without breaking ASN.1 encoding keys.
- */
-function send_signed_response(array $payload, CertificateManager $certManager): void
-{
-    // Let CertificateManager completely handle the logic cleanly using internal safe key structures
-    $signedPayload = $certManager->createSignedRequest($payload, 'ZURUBANK');
-    
-    if (empty($signedPayload['signature'])) {
-        error_log("ZURUBANK: CertificateManager failed to sign response payload. Dropping fallback signature placeholder.");
-        $signedPayload['signature'] = null;
-    }
-    
-    echo json_encode($signedPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-    exit;
 }
