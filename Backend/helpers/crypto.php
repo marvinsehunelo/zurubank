@@ -4,31 +4,18 @@
 require_once __DIR__ . '/CertificateManager.php';
 
 /**
- * JSON canonicalization - used for VERIFYING signatures
- * This matches what VOUCHMORPH uses to verify
- * CRITICAL: Must match VOUCHMORPH's canonicalization exactly
+ * Sign payload for outgoing response
+ * Uses the private key string directly (like SACCUSSALIS)
  */
-function canonicalize_payload(array $payload): string
+function sign_payload($payload, $privateKey = null)
 {
-    // For VERIFYING incoming requests - remove signature fields
-    unset($payload['signature']);
-    unset($payload['certificate']);
-    // Keep requester and timestamp for verification
-    ksort($payload);
-    return json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-}
-
-/**
- * Sign payload for outgoing response using CertificateManager
- * CRITICAL: Must match exactly what VOUCHMORPH expects to verify
- */
-function sign_payload($payload)
-{
-    $certManager = new CertificateManager();
-    
-    if (!$certManager->isConfigured()) {
-        error_log("ZURUBANK: CertificateManager not configured - cannot sign response");
-        return null;
+    if (!$privateKey) {
+        $certManager = new CertificateManager();
+        $privateKey = $certManager->myPrivateKey;  // Direct property access
+        if (!$privateKey) {
+            error_log("ZURUBANK: No private key available for signing");
+            return null;
+        }
     }
     
     $timestamp = time();
@@ -40,14 +27,13 @@ function sign_payload($payload)
     error_log("ZURUBANK: Signing payload length: " . strlen($payloadJson));
     
     $signature = '';
-    $privateKey = $certManager->getMyPrivateKey();
-    
-    if (!$privateKey) {
-        error_log("ZURUBANK: No private key available for signing");
+    $keyResource = openssl_pkey_get_private($privateKey);
+    if (!$keyResource) {
+        error_log("ZURUBANK: Failed to load private key resource: " . openssl_error_string());
         return null;
     }
     
-    $signResult = openssl_sign($payloadJson, $signature, $privateKey, OPENSSL_ALGO_SHA256);
+    $signResult = openssl_sign($payloadJson, $signature, $keyResource, OPENSSL_ALGO_SHA256);
     
     if (!$signResult) {
         error_log("ZURUBANK: Failed to sign payload - " . openssl_error_string());
@@ -65,7 +51,6 @@ function sign_payload($payload)
 
 /**
  * Send signed response with certificate
- * Uses certificate-based signing only (no RSA fallback)
  */
 function send_signed_response($payload, $httpCode = 200)
 {
@@ -75,18 +60,6 @@ function send_signed_response($payload, $httpCode = 200)
     }
     
     $certManager = new CertificateManager();
-    
-    // Check if CertificateManager is properly configured
-    if (!$certManager->isConfigured()) {
-        error_log("ZURUBANK: CertificateManager not configured - cannot send signed response");
-        header('Content-Type: application/json');
-        http_response_code(500);
-        echo json_encode([
-            'success' => false,
-            'error' => 'CertificateManager not configured'
-        ]);
-        exit;
-    }
     
     // Sign the payload
     $signed = sign_payload($payload);
@@ -102,8 +75,8 @@ function send_signed_response($payload, $httpCode = 200)
         exit;
     }
     
-    // Get certificate
-    $certContent = $certManager->getMyCertificate();
+    // Get certificate directly from property
+    $certContent = $certManager->myCertificate;
     if (!$certContent) {
         error_log("ZURUBANK: No certificate available");
         header('Content-Type: application/json');
@@ -127,10 +100,7 @@ function send_signed_response($payload, $httpCode = 200)
     if (isset($logResponse['certificate'])) {
         $logResponse['certificate'] = '[CERTIFICATE LENGTH: ' . strlen($logResponse['certificate']) . ']';
     }
-    if (isset($logResponse['signature'])) {
-        $logResponse['signature'] = '[SIGNATURE LENGTH: ' . strlen($logResponse['signature']) . ']';
-    }
-    error_log("ZURUBANK: Sending signed response: " . json_encode($logResponse));
+    error_log("ZURUBANK: Sending signed response");
     
     header('Content-Type: application/json');
     http_response_code($httpCode);
@@ -140,7 +110,6 @@ function send_signed_response($payload, $httpCode = 200)
 
 /**
  * Verify incoming request signature from requester
- * Uses certificate-based verification only (no RSA fallback)
  */
 function verify_requester_signature($input, $pdo)
 {
@@ -155,12 +124,12 @@ function verify_requester_signature($input, $pdo)
     
     if (!$certificate) {
         error_log("ZURUBANK: Missing certificate from {$requester}");
-        return ['valid' => false, 'message' => 'Certificate required - please upgrade to certificate-based authentication'];
+        return ['valid' => false, 'message' => 'Certificate required'];
     }
     
     $certManager = new CertificateManager();
     
-    // Verify the certificate is valid and signed by trusted CA
+    // Verify the certificate
     if (!$certManager->verifyCertificate($certificate)) {
         error_log("ZURUBANK: Invalid certificate from {$requester}");
         return ['valid' => false, 'message' => 'Invalid certificate'];
@@ -173,7 +142,7 @@ function verify_requester_signature($input, $pdo)
         return ['valid' => false, 'message' => 'Cannot extract public key'];
     }
     
-    // Build payload for verification (remove signature and certificate, keep all other fields)
+    // Build payload for verification
     $payloadToVerify = [];
     foreach ($input as $key => $value) {
         if (!in_array($key, ['signature', 'certificate'])) {
@@ -181,36 +150,29 @@ function verify_requester_signature($input, $pdo)
         }
     }
     
-    // CRITICAL: Must use same canonicalization as VOUCHMORPH
     ksort($payloadToVerify);
     $jsonToVerify = json_encode($payloadToVerify, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     $decodedSig = base64_decode($signature);
     
     $keyResource = openssl_pkey_get_public($publicKey);
     if (!$keyResource) {
-        error_log("ZURUBANK: Invalid public key resource");
         return ['valid' => false, 'message' => 'Invalid public key'];
     }
     
     $result = openssl_verify($jsonToVerify, $decodedSig, $keyResource, OPENSSL_ALGO_SHA256);
     $isValid = ($result === 1);
     
-    error_log("ZURUBANK: Certificate verification from {$requester} - Signature: " . ($isValid ? "VALID ✓" : "INVALID ✗"));
+    error_log("ZURUBANK: Signature verification from {$requester}: " . ($isValid ? "VALID ✓" : "INVALID ✗"));
     
-    if ($result === -1) {
-        error_log("ZURUBANK: OpenSSL verification error: " . openssl_error_string());
-    }
-    
-    if ($isValid) {
-        return ['valid' => true, 'message' => 'Certificate verified', 'requester' => $requester];
-    } else {
-        return ['valid' => false, 'message' => 'Invalid signature'];
-    }
+    return [
+        'valid' => $isValid,
+        'message' => $isValid ? 'Signature verified' : 'Invalid signature',
+        'requester' => $requester
+    ];
 }
 
 /**
  * Helper: Verify and get authenticated requester
- * Use this at the start of all API endpoints
  */
 function authenticate_request($pdo, $requiredRole = null)
 {
@@ -233,10 +195,7 @@ function authenticate_request($pdo, $requiredRole = null)
     return $verification['requester'];
 }
 
-// ============================================================
-// UTILITY FUNCTIONS
-// ============================================================
-
+// Utility functions
 function hash_token($token, $pin) {
     return hash('sha256', $token . $pin);
 }
