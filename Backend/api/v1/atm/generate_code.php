@@ -13,7 +13,6 @@ require_once __DIR__ . '/../../../helpers/CertificateManager.php';
 ini_set('memory_limit', '512M');
 ini_set('output_buffering', '4096');
 
-
 header('Content-Type: application/json');
 
 if (ob_get_level()) {
@@ -122,7 +121,7 @@ try {
                 'requester' => $requester,
                 'timestamp' => time()
             ];
-            send_signed_response($duplicateResponse);
+            send_signed_response($duplicateResponse, $certManager);
         }
     }
 
@@ -299,7 +298,7 @@ try {
     ];
     
     error_log("ZURUBANK: Sending signed response");
-    send_signed_response($responsePayload);
+    send_signed_response($responsePayload, $certManager);
 
 } catch (Exception $e) {
     if (isset($pdo) && $pdo->inTransaction()) {
@@ -316,7 +315,8 @@ try {
     ];
     
     try {
-        send_signed_response($errorResponse);
+        $fallbackCertManager = new CertificateManager('ZURUBANK');
+        send_signed_response($errorResponse, $fallbackCertManager);
     } catch (Exception $sigError) {
         echo json_encode($errorResponse);
     }
@@ -325,4 +325,22 @@ try {
     if (ob_get_length() !== false) {
         ob_end_flush();
     }
+}
+
+/**
+ * Clean helper function to handle structured response signing 
+ * without breaking ASN.1 encoding keys.
+ */
+function send_signed_response(array $payload, CertificateManager $certManager): void
+{
+    // Let CertificateManager completely handle the logic cleanly using internal safe key structures
+    $signedPayload = $certManager->createSignedRequest($payload, 'ZURUBANK');
+    
+    if (empty($signedPayload['signature'])) {
+        error_log("ZURUBANK: CertificateManager failed to sign response payload. Dropping fallback signature placeholder.");
+        $signedPayload['signature'] = null;
+    }
+    
+    echo json_encode($signedPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    exit;
 }
