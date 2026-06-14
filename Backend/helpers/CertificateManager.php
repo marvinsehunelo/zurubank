@@ -53,6 +53,9 @@ class CertificateManager
     /**
      * Verify a certificate against the trusted CA root
      */
+    /**
+     * Verify a certificate against the trusted CA root
+     */
     public function verifyCertificate(string $certificatePem): bool
     {
         if (!$this->caCert) {
@@ -60,7 +63,7 @@ class CertificateManager
             return false;
         }
         
-        // Write to temp files for openssl
+        // Step 1: Trust Anchor validation via Temp Files
         $tempCert = tempnam(sys_get_temp_dir(), 'cert_');
         $tempCA = tempnam(sys_get_temp_dir(), 'ca_');
         
@@ -72,28 +75,28 @@ class CertificateManager
         exec($cmd, $output, $returnCode);
         $result = ($returnCode === 0);
         
-        // Also check certificate is not expired
-        $expiryCmd = "openssl x509 -in " . escapeshellarg($tempCert) . " -noout -enddate 2>&1";
-        $expiryOutput = []; // Explicitly initialize array
-        exec($expiryCmd, $expiryOutput);
-        
-        foreach ($expiryOutput as $line) {
-            // Ensure $line is processed as a pure string
-            if (is_string($line) && preg_match('/notAfter=(.*)/', $line, $matches)) {
-                $dateString = trim((string)$matches);
-                $expiryDate = strtotime($dateString);
-                
-                if ($expiryDate === false || $expiryDate < time()) {
-                    error_log("CertificateManager: Certificate has expired or has an invalid date: " . $dateString);
-                    $result = false;
-                }
-            }
-        }
-        
         unlink($tempCert);
         unlink($tempCA);
+
+        // Step 2: Native PHP Expiry Check (Avoids terminal scraping arrays completely)
+        try {
+            $certData = openssl_x509_parse($certificatePem);
+            if ($certData && isset($certData['validTo_time_t'])) {
+                $expiryTimestamp = (int)$certData['validTo_time_t'];
+                if ($expiryTimestamp < time()) {
+                    error_log("CertificateManager: Certificate has expired natively on " . date('Y-m-d H:i:s', $expiryTimestamp));
+                    $result = false;
+                }
+            } else {
+                error_log("CertificateManager: Failed to parse X509 certificate metadata structure.");
+                $result = false;
+            }
+        } catch (Exception $e) {
+            error_log("CertificateManager: Exception during native validation: " . $e->getMessage());
+            $result = false;
+        }
         
-        error_log("CertificateManager: Certificate verification: " . ($result ? "PASSED" : "FAILED"));
+        error_log("CertificateManager: Certificate verification ultimate status: " . ($result ? "PASSED" : "FAILED"));
         return $result;
     }
     
