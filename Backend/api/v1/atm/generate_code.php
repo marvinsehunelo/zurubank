@@ -2,8 +2,7 @@
 // --------------------------------------------------
 // generate_code.php
 // ZuruBank Instant Money Voucher Generator
-// ALIGNED with SwapService expectations
-// CERTIFICATE-BASED VERIFICATION (Visa/Mastercard model)
+// SIMPLIFIED VERSION - Excludes created_by and redeemed_by
 // --------------------------------------------------
 
 require_once __DIR__ . '/../../../config/db.php';
@@ -77,204 +76,128 @@ try {
     $currency = trim($input['currency'] ?? 'BWP');
     $reference = trim($input['reference'] ?? '');
     
-    // ============================================================
-    // EXTRACT SOURCE INFORMATION (from SACCUSSALIS/VOUCHMORPH)
-    // ============================================================
-    
+    // Extract source information
     $sourceInstitution = null;
     $sourceHoldReference = null;
 
-    // Priority 1: Check for source_hold structure (sent by SACCUSSALIS)
     if (isset($input['source_hold'])) {
         $sourceInstitution = $input['source_hold']['source'] ?? null;
-        $sourceHoldReference = $input['source_hold']['hold_reference'] ?? 
-                               $input['source_hold']['reference'] ?? 
-                               $input['hold_reference'] ?? null;
-        error_log("ZURUBANK: Source from source_hold: Institution={$sourceInstitution}, HoldRef={$sourceHoldReference}");
+        $sourceHoldReference = $input['source_hold']['hold_reference'] ?? $input['source_hold']['reference'] ?? null;
     }
 
-    // Priority 2: Check for source_verification structure
-    if (empty($sourceInstitution) && isset($input['source_verification'])) {
-        $sourceInstitution = $input['source_verification']['source'] ?? null;
-        $sourceHoldReference = $input['source_verification']['hold_reference'] ?? $sourceHoldReference;
-        error_log("ZURUBANK: Source from source_verification: Institution={$sourceInstitution}, HoldRef={$sourceHoldReference}");
-    }
-
-    // Priority 3: Check direct fields
     if (empty($sourceInstitution)) {
-        $sourceInstitution = trim($input['source_institution'] ?? $input['from_institution'] ?? 'SACCUSSALIS');
+        $sourceInstitution = trim($input['source_institution'] ?? 'SACCUSSALIS');
     }
     if (empty($sourceHoldReference)) {
-        $sourceHoldReference = trim($input['source_hold_reference'] ?? $input['hold_reference'] ?? null);
+        $sourceHoldReference = trim($input['source_hold_reference'] ?? null);
     }
 
-    // Origin is ALWAYS 'swap' for cross-border transactions
     $origin = 'swap';
-    
-    // Source asset type (if provided)
-    $sourceAssetType = trim($input['source_asset_type'] ?? $input['asset_type'] ?? null);
-    
-    // Code hash for idempotency
+    $sourceAssetType = trim($input['source_asset_type'] ?? null);
     $codeHash = trim($input['code_hash'] ?? '');
     $idempotencyKey = $input['idempotency_key'] ?? $input['idempotencyKey'] ?? $reference;
-    
-    // SAT fields (if applicable)
     $satPurchased = $input['sat_purchased'] ?? null;
     $satFeePaidBy = $input['sat_fee_paid_by'] ?? null;
-    
     $noteBreakdown = $input['note_breakdown'] ?? [];
-
-    error_log("ZURUBANK: Final values - Origin: {$origin}, SourceInst: {$sourceInstitution}, SourceHoldRef: {$sourceHoldReference}");
 
     if ($beneficiaryPhone === '' || $amount <= 0) {
         throw new Exception("beneficiary_phone and valid amount are required");
     }
 
-    // Normalize phone number (keep + prefix)
+    // Normalize phone number
     $normalizedPhone = $beneficiaryPhone;
     if (!str_starts_with($normalizedPhone, '+')) {
         $normalizedPhone = '+' . $normalizedPhone;
     }
     error_log("ZURUBANK: Normalized phone: {$normalizedPhone}");
 
-    // Check idempotency to prevent duplicate voucher creation
+    // Check idempotency
     if ($idempotencyKey) {
-        $checkStmt = $pdo->prepare("
-            SELECT voucher_id FROM instant_money_vouchers 
-            WHERE reference = :reference OR external_reference = :idempotency_key OR code_hash = :code_hash
-            LIMIT 1
-        ");
-        $checkStmt->execute([
-            'reference' => $reference,
-            'idempotency_key' => $idempotencyKey,
-            'code_hash' => $codeHash
-        ]);
-        
+        $checkStmt = $pdo->prepare("SELECT voucher_id FROM instant_money_vouchers WHERE reference = :reference LIMIT 1");
+        $checkStmt->execute(['reference' => $reference]);
         if ($checkStmt->fetch()) {
-            error_log("ZURUBANK: Duplicate voucher request prevented (reference: {$reference})");
-            
             $duplicateResponse = [
                 'status' => 'SUCCESS',
                 'token_generated' => true,
                 'duplicate' => true,
                 'message' => 'Duplicate request - voucher already generated',
                 'requester' => $requester,
-                'signature_verified' => $isValid,
                 'timestamp' => time()
             ];
-            
             send_signed_response($duplicateResponse);
         }
     }
 
-    // HARD CODE created_by = 2, redeemed_by = NULL
-    $createdBy = 2;
-    $redeemedBy = null;  // NULL for unredeemed vouchers
-    
-    // Expiry (24 hours from now)
+    // Expiry
     $voucherExpiresAt = date('Y-m-d H:i:s', strtotime('+24 hours'));
     $satExpiresAt = $satPurchased ? date('Y-m-d H:i:s', strtotime('+24 hours')) : null;
 
-    // Generate voucher number and PIN
+    // Generate codes
     $voucherNumber = str_pad(random_int(0, 999999999999), 12, '0', STR_PAD_LEFT);
     $voucherPin    = str_pad(random_int(0, 999999), 6, '0', STR_PAD_LEFT);
     $authCode = str_pad(random_int(0, 99999999), 8, '0', STR_PAD_LEFT);
-    
-    // Generate QR code and barcode (simple format)
     $qrCode = "ZURUBANK:{$voucherNumber}:{$authCode}";
     $barcode = $voucherNumber;
 
-    // Insert into instant_money_vouchers - EXACT column order matching your table
+    // SIMPLIFIED INSERT - Excluding created_by and redeemed_by
+    // Let database use default values for those columns
     $stmt = $pdo->prepare("
         INSERT INTO instant_money_vouchers (
             amount,
             currency,
-            created_by,
             recipient_phone,
-            created_at,
             voucher_number,
             voucher_pin,
-            redeemed_by,
             voucher_created_at,
             voucher_expires_at,
-            sat_purchased,
-            sat_fee_paid_by,
-            sat_expires_at,
-            redeemed_at,
-            swap_made_at,
-            holding_account,
             status,
             origin,
-            external_reference,
+            reference,
             source_institution,
             source_hold_reference,
-            reference,
-            source_asset_type,
-            code_hash
+            code_hash,
+            created_at
         )
         VALUES (
             :amount,
             :currency,
-            :created_by,
             :recipient_phone,
-            NOW(),
             :voucher_number,
             :voucher_pin,
-            :redeemed_by,
             NOW(),
             :voucher_expires_at,
-            :sat_purchased,
-            :sat_fee_paid_by,
-            :sat_expires_at,
-            NULL,
-            NULL,
-            'VOUCHER-SUSPENSE',
             'active',
             :origin,
-            :external_reference,
+            :reference,
             :source_institution,
             :source_hold_reference,
-            :reference,
-            :source_asset_type,
-            :code_hash
+            :code_hash,
+            NOW()
         )
         RETURNING voucher_id
     ");
 
-    // Set NULL for empty values
-    $sourceInstitutionValue = empty($sourceInstitution) ? null : $sourceInstitution;
-    $sourceHoldReferenceValue = empty($sourceHoldReference) ? null : $sourceHoldReference;
-    $sourceAssetTypeValue = empty($sourceAssetType) ? null : $sourceAssetType;
-    $codeHashValue = empty($codeHash) ? null : ($codeHash ?: $idempotencyKey);
-
     $stmt->execute([
         ':amount'                 => $amount,
         ':currency'               => $currency,
-        ':created_by'             => $createdBy,  // INTEGER 2
         ':recipient_phone'        => $normalizedPhone,
         ':voucher_number'         => $voucherNumber,
         ':voucher_pin'            => $voucherPin,
-        ':redeemed_by'            => $redeemedBy,  // NULL
         ':voucher_expires_at'     => $voucherExpiresAt,
-        ':sat_purchased'          => $satPurchased,
-        ':sat_fee_paid_by'        => $satFeePaidBy,
-        ':sat_expires_at'         => $satExpiresAt,
         ':origin'                 => $origin,
-        ':external_reference'     => $idempotencyKey ?: $reference,
-        ':source_institution'     => $sourceInstitutionValue,
-        ':source_hold_reference'  => $sourceHoldReferenceValue,
         ':reference'              => $reference,
-        ':source_asset_type'      => $sourceAssetTypeValue,
-        ':code_hash'              => $codeHashValue
+        ':source_institution'     => $sourceInstitution,
+        ':source_hold_reference'  => $sourceHoldReference,
+        ':code_hash'              => $codeHash ?: $idempotencyKey
     ]);
 
     $voucherId = $stmt->fetchColumn();
 
     if (!$voucherId) {
-        throw new Exception("Failed to create swap voucher");
+        throw new Exception("Failed to create voucher");
     }
 
-    // Create voucher_cashout_details table if not exists
+    // Create voucher_cashout_details
     $pdo->exec("
         CREATE TABLE IF NOT EXISTS voucher_cashout_details (
             id SERIAL PRIMARY KEY,
@@ -288,16 +211,11 @@ try {
             instructions TEXT,
             expires_at TIMESTAMP NOT NULL,
             created_at TIMESTAMP DEFAULT NOW(),
-            redeemed_at TIMESTAMP,
-            redeemed_by_user_id INTEGER,
-            redeemed_by_atm VARCHAR(100),
-            redeemed_by_agent VARCHAR(100),
             reference VARCHAR(255),
             source_institution VARCHAR(100)
         )
     ");
 
-    // Generate instructions
     $instructions = "🔐 **ZuruBank Cashout Voucher**\n\n"
         . "**Amount:** {$currency} {$amount}\n"
         . "**Voucher:** {$voucherNumber}\n"
@@ -305,30 +223,12 @@ try {
         . "**Auth Code:** {$authCode}\n"
         . "**Expires:** " . date('d M Y H:i', strtotime($voucherExpiresAt)) . "\n\n"
         . "**How to cash out:**\n\n"
-        . "🏧 **ATMs:**\n"
-        . "1. Go to ANY ZuruBank ATM\n"
-        . "2. Select 'Cardless Cashout'\n"
-        . "3. Enter voucher number: {$voucherNumber}\n"
-        . "4. Enter PIN: {$voucherPin}\n"
-        . "5. Enter amount: {$currency} {$amount}\n"
-        . "6. Collect your cash\n\n"
-        . "👤 **Agents:**\n"
-        . "1. Visit ANY ZuruBank Agent\n"
-        . "2. Tell them you want to cashout a voucher\n"
-        . "3. Provide voucher number: {$voucherNumber}\n"
-        . "4. Provide PIN: {$voucherPin} when asked\n"
-        . "5. Agent will process the cashout\n"
-        . "6. Collect your cash and sign receipt\n\n"
-        . "📱 **Mobile App:**\n"
-        . "1. Open ZuruBank App\n"
-        . "2. Select 'Cashout Voucher'\n"
-        . "3. Enter voucher number: {$voucherNumber}\n"
-        . "4. Enter PIN: {$voucherPin}\n"
-        . "5. Funds will be sent to your linked wallet\n\n"
-        . "⏰ **Valid for 24 hours only**\n"
+        . "🏧 Go to ANY ZuruBank ATM, select 'Cardless Cashout'\n"
+        . "📱 Use ZuruBank Mobile App\n"
+        . "👤 Visit ANY ZuruBank Agent\n\n"
+        . "⏰ Valid for 24 hours only\n"
         . "🔒 Keep this information secure!";
 
-    // Insert into voucher_cashout_details
     $stmtDetails = $pdo->prepare("
         INSERT INTO voucher_cashout_details (
             voucher_number,
@@ -372,90 +272,14 @@ try {
         ':instructions'    => $instructions,
         ':expires_at'      => $voucherExpiresAt,
         ':reference'       => $reference,
-        ':source_institution' => $sourceInstitutionValue
-    ]);
-
-    $detailsId = $stmtDetails->fetchColumn();
-
-    // Create audit_logs table if not exists
-    $pdo->exec("
-        CREATE TABLE IF NOT EXISTS audit_logs (
-            id SERIAL PRIMARY KEY,
-            entity VARCHAR(100),
-            entity_id INTEGER,
-            action VARCHAR(50),
-            category VARCHAR(50),
-            severity VARCHAR(20),
-            old_value TEXT,
-            new_value TEXT,
-            performed_at TIMESTAMP DEFAULT NOW(),
-            performed_by VARCHAR(100),
-            ip_address VARCHAR(50),
-            user_agent TEXT,
-            geo_location VARCHAR(100)
-        )
-    ");
-
-    // Get client IP and user agent
-    $ipAddress = $_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['REMOTE_ADDR'] ?? null;
-    $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? null;
-    
-    // Audit log
-    $auditStmt = $pdo->prepare("
-        INSERT INTO audit_logs (
-            entity, 
-            entity_id, 
-            action, 
-            category, 
-            severity, 
-            old_value, 
-            new_value, 
-            performed_at, 
-            performed_by, 
-            ip_address, 
-            user_agent, 
-            geo_location
-        )
-        VALUES (
-            'instant_money_vouchers', 
-            :entity_id, 
-            'GENERATE', 
-            'financial', 
-            'info', 
-            NULL, 
-            :new_value, 
-            NOW(), 
-            :performed_by, 
-            :ip_address, 
-            :user_agent, 
-            NULL
-        )
-    ");
-    $auditStmt->execute([
-        'entity_id' => $voucherId,
-        'new_value' => json_encode([
-            'signature_verified' => $isValid,
-            'amount' => $amount,
-            'currency' => $currency,
-            'reference' => $reference,
-            'beneficiary' => $beneficiaryPhone,
-            'voucher_number' => $voucherNumber,
-            'origin' => $origin,
-            'source_institution' => $sourceInstitutionValue,
-            'source_hold_reference' => $sourceHoldReferenceValue
-        ]),
-        'performed_by' => $requester,
-        'ip_address' => $ipAddress,
-        'user_agent' => $userAgent
+        ':source_institution' => $sourceInstitution
     ]);
 
     $pdo->commit();
 
-    error_log("ZURUBANK: Voucher generated successfully - Number: {$voucherNumber}, Amount: {$amount}, Reference: {$reference}");
+    error_log("ZURUBANK: Voucher generated successfully - Number: {$voucherNumber}");
 
-    // ============================================================
-    // BUILD RESPONSE PAYLOAD
-    // ============================================================
+    // Response
     $responsePayload = [
         'status' => 'SUCCESS',
         'token_generated' => true,
@@ -466,24 +290,13 @@ try {
         'barcode' => $barcode,
         'amount' => $amount,
         'currency' => $currency,
-        'expiry' => $voucherExpiresAt,
         'expires_at' => $voucherExpiresAt,
         'reference' => $reference,
         'requester' => $requester,
         'signature_verified' => $isValid,
-        'verification_method' => 'certificate',
         'message' => 'ATM token generated successfully',
         'instructions' => $instructions,
-        'timestamp' => time(),
-        'metadata' => [
-            'voucher_id' => $voucherId,
-            'reference' => $reference,
-            'origin' => $origin,
-            'source_institution' => $sourceInstitutionValue,
-            'source_hold_reference' => $sourceHoldReferenceValue,
-            'source_asset_type' => $sourceAssetTypeValue,
-            'note_breakdown' => $noteBreakdown
-        ]
+        'timestamp' => time()
     ];
     
     error_log("ZURUBANK: Sending signed response");
@@ -495,7 +308,6 @@ try {
     }
     
     error_log("ZURUBANK generate_code.php ERROR: " . $e->getMessage());
-    error_log("Stack trace: " . $e->getTraceAsString());
     
     $errorResponse = [
         'status' => 'ERROR',
