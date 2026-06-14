@@ -17,9 +17,12 @@ class CertificateManager
     
     public function __construct(?string $memberName = null)
     {
-        $this->myName = $memberName ?? getenv('MEMBER_NAME') ?: 'ZURUBANK';
+        // Use VOUCHMORPH_PARTNER_NAME as the primary source, fallback to MEMBER_NAME for compatibility
+        $this->myName = $memberName ?? getenv('VOUCHMORPH_PARTNER_NAME') ?: (getenv('MEMBER_NAME') ?: 'ZURUBANK');
         
-        // Load CA certificate (trust anchor)
+        error_log("CertificateManager: Initialized for {$this->myName}");
+        
+        // Load CA certificate (trust anchor) - same for all members
         $caContent = getenv('VOUCHMORPH_CA_CERT_CONTENT');
         if ($caContent) {
             $this->caCert = $this->normalizePemContent($caContent);
@@ -28,7 +31,7 @@ class CertificateManager
             error_log("CertificateManager: WARNING - No CA certificate found for {$this->myName}");
         }
         
-        // Load this member's private key - try multiple environment variable names
+        // Load this member's private key - use partner name
         $privateKeyContent = $this->getPrivateKeyFromEnv();
         
         if ($privateKeyContent) {
@@ -58,12 +61,19 @@ class CertificateManager
      */
     private function getPrivateKeyFromEnv(): ?string
     {
-        // Try different possible environment variable names
+        // Try different possible environment variable names based on VOUCHMORPH_PARTNER_NAME
         $possibleNames = [
+            // Primary: Using VOUCHMORPH_PARTNER_NAME value (e.g., ZURUBANK_PRIVATE_KEY_CONTENT)
             $this->myName . '_PRIVATE_KEY_CONTENT',
             $this->myName . '_PRIVATE_KEY',
+            
+            // Direct fallbacks
+            'ZURUBANK_PRIVATE_KEY_CONTENT',
             'ZURUBANK_PRIVATE_KEY',
             'ZURUBANK_PRIVATE_KEY_BASE64',
+            
+            // Generic fallbacks
+            'PRIVATE_KEY_CONTENT',
             'PRIVATE_KEY'
         ];
         
@@ -73,10 +83,11 @@ class CertificateManager
                 error_log("CertificateManager: Found private key in env: {$name}");
                 
                 // Check if it's base64 encoded (usually a single line without BEGIN/END)
-                if ($name === 'ZURUBANK_PRIVATE_KEY_BASE64' || (strpos($value, '-----BEGIN') === false && strlen($value) > 100)) {
-                    error_log("CertificateManager: Decoding base64 private key");
+                if (strpos($name, 'BASE64') !== false || (strpos($value, '-----BEGIN') === false && strlen($value) > 100 && !preg_match('/\n/', $value))) {
+                    error_log("CertificateManager: Attempting to decode as base64");
                     $decoded = base64_decode($value);
-                    if ($decoded && strpos($decoded, 'BEGIN') !== false) {
+                    if ($decoded && (strpos($decoded, 'BEGIN PRIVATE KEY') !== false || strpos($decoded, 'BEGIN RSA PRIVATE KEY') !== false)) {
+                        error_log("CertificateManager: Successfully decoded base64 private key");
                         return $decoded;
                     }
                 }
@@ -96,8 +107,10 @@ class CertificateManager
         $possibleNames = [
             $this->myName . '_CERT_CONTENT',
             $this->myName . '_CERT',
+            'ZURUBANK_CERT_CONTENT',
             'ZURUBANK_CERT',
             'ZURUBANK_CERT_BASE64',
+            'CERTIFICATE_CONTENT',
             'CERTIFICATE'
         ];
         
@@ -107,9 +120,10 @@ class CertificateManager
                 error_log("CertificateManager: Found certificate in env: {$name}");
                 
                 // Check if it's base64 encoded
-                if ($name === 'ZURUBANK_CERT_BASE64' || (strpos($value, '-----BEGIN') === false && strlen($value) > 100)) {
+                if (strpos($name, 'BASE64') !== false || (strpos($value, '-----BEGIN') === false && strlen($value) > 100 && !preg_match('/\n/', $value))) {
                     $decoded = base64_decode($value);
-                    if ($decoded && strpos($decoded, 'BEGIN') !== false) {
+                    if ($decoded && (strpos($decoded, 'BEGIN CERTIFICATE') !== false)) {
+                        error_log("CertificateManager: Successfully decoded base64 certificate");
                         return $decoded;
                     }
                 }
@@ -417,6 +431,8 @@ class CertificateManager
     {
         if (!$this->myPrivateKey || !$this->myCertificate) {
             error_log("CertificateManager: Cannot sign request - missing private key or certificate for {$this->myName}");
+            error_log("CertificateManager: myPrivateKey exists: " . ($this->myPrivateKey ? "YES" : "NO"));
+            error_log("CertificateManager: myCertificate exists: " . ($this->myCertificate ? "YES" : "NO"));
             return $payload;
         }
         
