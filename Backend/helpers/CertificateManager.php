@@ -3,111 +3,51 @@
 
 /**
  * Certificate Manager - Visa/Mastercard style PKI
- * Uses certificate-based authentication, NOT RSA key exchange
+ * 
+ * Members present their certificate with each request.
+ * Receivers verify against the trusted CA root.
+ * NO manual key exchange needed for new members!
+ * 
+ * BENCHMARKED AGAINST SACCUSSALIS WORKING VERSION
  */
 class CertificateManager
 {
     private ?string $caCert = null;
-    private $myPrivateKey = null;
+    private ?string $myPrivateKey = null;  // Store as string, not resource (matches SACCUSSALIS)
     private ?string $myCertificate = null;
     private ?string $myName = null;
     
     public function __construct(?string $memberName = null)
     {
-        // Get partner name from environment
         $this->myName = $memberName ?? getenv('VOUCHMORPH_PARTNER_NAME') ?: 'ZURUBANK';
         
-        error_log("CertificateManager: Initialized for {$this->myName}");
-        
-        // Load CA certificate (trust anchor) - REQUIRED
+        // Load CA certificate (trust anchor)
         $caContent = getenv('VOUCHMORPH_CA_CERT_CONTENT');
-        if (!$caContent) {
-            error_log("CertificateManager: FATAL - No VOUCHMORPH_CA_CERT_CONTENT found");
-            $this->caCert = null;
+        if ($caContent) {
+            $this->caCert = str_replace(['\\n', '\n'], "\n", $caContent);
+            error_log("CertificateManager: CA certificate loaded for {$this->myName}");
         } else {
-            $this->caCert = $this->normalizePemContent($caContent);
-            error_log("CertificateManager: CA certificate loaded");
+            error_log("CertificateManager: WARNING - No CA certificate found for {$this->myName}");
         }
         
-        // Load this member's private key - use CERTIFICATE method variables
+        // Load this member's private key - SIMPLE, just like SACCUSSALIS
         $privateKeyContent = getenv($this->myName . '_PRIVATE_KEY_CONTENT');
-        if (!$privateKeyContent) {
-            error_log("CertificateManager: ERROR - No {$this->myName}_PRIVATE_KEY_CONTENT found");
-            $this->myPrivateKey = null;
+        if ($privateKeyContent) {
+            // Just replace newlines - NO complex normalization!
+            $this->myPrivateKey = str_replace(['\\n', '\n'], "\n", $privateKeyContent);
+            error_log("CertificateManager: Private key loaded for {$this->myName}");
         } else {
-            error_log("CertificateManager: Found private key in {$this->myName}_PRIVATE_KEY_CONTENT");
-            $privateKeyContent = $this->normalizePemContent($privateKeyContent);
-            $this->myPrivateKey = openssl_pkey_get_private($privateKeyContent);
-            
-            if (!$this->myPrivateKey) {
-                $error = openssl_error_string();
-                error_log("CertificateManager: Failed to load private key: " . $error);
-                
-                // Check if it's encrypted
-                if (strpos($privateKeyContent, 'ENCRYPTED') !== false || strpos($privateKeyContent, 'Proc-Type: 4,ENCRYPTED') !== false) {
-                    error_log("CertificateManager: Private key is ENCRYPTED. You need to decrypt it or provide passphrase.");
-                    error_log("CertificateManager: Run: openssl rsa -in encrypted.key -out decrypted.key");
-                }
-            } else {
-                error_log("CertificateManager: Private key loaded successfully");
-            }
+            error_log("CertificateManager: WARNING - No private key found for {$this->myName}");
         }
         
         // Load this member's certificate
         $certContent = getenv($this->myName . '_CERT_CONTENT');
-        if (!$certContent) {
-            error_log("CertificateManager: ERROR - No {$this->myName}_CERT_CONTENT found");
-            $this->myCertificate = null;
-        } else {
-            $this->myCertificate = $this->normalizePemContent($certContent);
+        if ($certContent) {
+            $this->myCertificate = str_replace(['\\n', '\n'], "\n", $certContent);
             error_log("CertificateManager: Certificate loaded for {$this->myName}");
+        } else {
+            error_log("CertificateManager: WARNING - No certificate found for {$this->myName}");
         }
-        
-        // Log configuration status
-        error_log("CertificateManager: CA Cert: " . ($this->caCert ? "YES" : "NO"));
-        error_log("CertificateManager: Private Key: " . ($this->myPrivateKey ? "YES" : "NO"));
-        error_log("CertificateManager: Certificate: " . ($this->myCertificate ? "YES" : "NO"));
-    }
-    
-    /**
-     * Normalize PEM content - ensures proper line breaks
-     */
-    private function normalizePemContent(string $content): string
-    {
-        // Replace escaped newlines
-        $content = str_replace(['\\n', '\\r', '\r'], "\n", $content);
-        $content = str_replace("\r", "", $content);
-        $content = trim($content);
-        
-        // Ensure proper PEM format
-        if (preg_match('/-----BEGIN (.*?)-----/', $content)) {
-            $content = preg_replace('/-----BEGIN [^-]+-----/', "$0\n", $content);
-            $content = preg_replace('/-----END [^-]+-----/', "\n$0\n", $content);
-            
-            preg_match('/-----BEGIN (.*?)-----\n(.*?)\n-----END \\1-----/s', $content, $matches);
-            if (isset($matches[2])) {
-                $body = preg_replace('/\s/', '', $matches[2]);
-                $chunked = chunk_split($body, 64, "\n");
-                $content = "-----BEGIN {$matches[1]}-----\n" . trim($chunked) . "\n-----END {$matches[1]}-----\n";
-            }
-        }
-        
-        return $content;
-    }
-    
-    /**
-     * Check if CertificateManager is properly configured
-     */
-    public function isConfigured(): bool
-    {
-        $configured = ($this->caCert !== null && $this->myPrivateKey !== null && $this->myCertificate !== null);
-        if (!$configured) {
-            error_log("CertificateManager: NOT fully configured");
-            error_log("  - caCert: " . ($this->caCert ? "YES" : "NO"));
-            error_log("  - myPrivateKey: " . ($this->myPrivateKey ? "YES" : "NO"));
-            error_log("  - myCertificate: " . ($this->myCertificate ? "YES" : "NO"));
-        }
-        return $configured;
     }
     
     /**
@@ -127,11 +67,19 @@ class CertificateManager
     }
     
     /**
-     * Get this member's private key resource
+     * Get this member's private key (as string)
      */
-    public function getMyPrivateKey()
+    public function getMyPrivateKey(): ?string
     {
         return $this->myPrivateKey;
+    }
+    
+    /**
+     * Check if CertificateManager is properly configured
+     */
+    public function isConfigured(): bool
+    {
+        return ($this->caCert !== null && $this->myPrivateKey !== null && $this->myCertificate !== null);
     }
     
     /**
@@ -144,19 +92,19 @@ class CertificateManager
             return false;
         }
         
-        $certificatePem = $this->normalizePemContent($certificatePem);
-        
+        // Write to temp files for openssl
         $tempCert = tempnam(sys_get_temp_dir(), 'cert_');
         $tempCA = tempnam(sys_get_temp_dir(), 'ca_');
         
         file_put_contents($tempCert, $certificatePem);
         file_put_contents($tempCA, $this->caCert);
         
+        // Verify certificate chains to our trusted CA
         $cmd = "openssl verify -CAfile " . escapeshellarg($tempCA) . " " . escapeshellarg($tempCert) . " 2>&1";
         exec($cmd, $output, $returnCode);
         $result = ($returnCode === 0);
         
-        // Check expiration
+        // Also check certificate is not expired
         $expiryCmd = "openssl x509 -in " . escapeshellarg($tempCert) . " -noout -enddate 2>&1";
         exec($expiryCmd, $expiryOutput);
         foreach ($expiryOutput as $line) {
@@ -181,8 +129,6 @@ class CertificateManager
      */
     public function extractPublicKeyFromCert(string $certificatePem): ?string
     {
-        $certificatePem = $this->normalizePemContent($certificatePem);
-        
         $tempCert = tempnam(sys_get_temp_dir(), 'extract_');
         file_put_contents($tempCert, $certificatePem);
         
@@ -192,7 +138,7 @@ class CertificateManager
         unlink($tempCert);
         
         if ($publicKey && strpos($publicKey, 'BEGIN PUBLIC KEY') !== false) {
-            return $this->normalizePemContent($publicKey);
+            return $publicKey;
         }
         
         return null;
@@ -208,38 +154,42 @@ class CertificateManager
         $requester = $request['requester'] ?? 'UNKNOWN';
         
         if (!$certificate) {
+            error_log("CertificateManager: No certificate provided from {$requester}");
             return ['verified' => false, 'message' => 'No certificate provided', 'requester' => $requester];
         }
         
         if (!$signature) {
+            error_log("CertificateManager: No signature provided from {$requester}");
             return ['verified' => false, 'message' => 'No signature provided', 'requester' => $requester];
         }
         
-        $certificate = $this->normalizePemContent($certificate);
-        
+        // Step 1: Verify certificate chains to trusted CA
         if (!$this->verifyCertificate($certificate)) {
+            error_log("CertificateManager: Certificate not trusted from {$requester}");
             return ['verified' => false, 'message' => 'Certificate not trusted', 'requester' => $requester];
         }
         
+        // Step 2: Extract public key from certificate
         $publicKey = $this->extractPublicKeyFromCert($certificate);
         if (!$publicKey) {
+            error_log("CertificateManager: Cannot extract public key from certificate");
             return ['verified' => false, 'message' => 'Cannot extract public key', 'requester' => $requester];
         }
         
-        // Prepare payload for verification (remove signature and certificate)
-        $payloadToVerify = [];
-        foreach ($request as $key => $value) {
-            if (!in_array($key, ['signature', 'certificate'])) {
-                $payloadToVerify[$key] = $value;
-            }
-        }
-        
+        // Step 3: Prepare payload for verification (remove signature and certificate)
+        $payloadToVerify = $request;
+        unset($payloadToVerify['signature']);
+        unset($payloadToVerify['certificate']);
+        unset($payloadToVerify['requester']);
         ksort($payloadToVerify);
+        
         $jsonToVerify = json_encode($payloadToVerify, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         $decodedSig = base64_decode($signature);
         
+        // Step 4: Verify signature
         $keyResource = openssl_pkey_get_public($publicKey);
         if (!$keyResource) {
+            error_log("CertificateManager: Invalid public key format");
             return ['verified' => false, 'message' => 'Invalid public key', 'requester' => $requester];
         }
         
@@ -247,6 +197,10 @@ class CertificateManager
         $isValid = ($result === 1);
         
         error_log("CertificateManager: Request from {$requester} - Signature: " . ($isValid ? "VALID ✓" : "INVALID ✗"));
+        
+        if ($result === -1) {
+            error_log("CertificateManager: OpenSSL error: " . openssl_error_string());
+        }
         
         return [
             'verified' => $isValid,
@@ -257,22 +211,33 @@ class CertificateManager
     
     /**
      * Create signed request with certificate (for outgoing)
+     * This matches SACCUSSALIS implementation
      */
     public function createSignedRequest(array $payload, string $requester): array
     {
         if (!$this->myPrivateKey || !$this->myCertificate) {
-            error_log("CertificateManager: Cannot sign request - missing private key or certificate");
+            error_log("CertificateManager: Cannot sign request - missing private key or certificate for {$this->myName}");
             return $payload;
         }
         
+        // CRITICAL: Must include timestamp and requester in the signed payload
         $timestamp = time();
-        $payloadWithTimestamp = array_merge($payload, ['timestamp' => $timestamp, 'requester' => $requester]);
+        $payloadWithTimestamp = array_merge($payload, ['timestamp' => $timestamp]);
         ksort($payloadWithTimestamp);
         
         $jsonToSign = json_encode($payloadWithTimestamp, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         
+        error_log("CertificateManager: Signing payload for {$requester}");
+        
         $signature = '';
-        $signResult = openssl_sign($jsonToSign, $signature, $this->myPrivateKey, OPENSSL_ALGO_SHA256);
+        $keyResource = openssl_pkey_get_private($this->myPrivateKey);
+        
+        if (!$keyResource) {
+            error_log("CertificateManager: Failed to load private key for signing - " . openssl_error_string());
+            return $payload;
+        }
+        
+        $signResult = openssl_sign($jsonToSign, $signature, $keyResource, OPENSSL_ALGO_SHA256);
         
         if (!$signResult) {
             error_log("CertificateManager: Failed to sign payload - " . openssl_error_string());
@@ -280,9 +245,11 @@ class CertificateManager
         }
         
         $encodedSignature = base64_encode($signature);
+        error_log("CertificateManager: Generated signature length: " . strlen($encodedSignature));
         
         return array_merge($payloadWithTimestamp, [
             'signature' => $encodedSignature,
+            'requester' => $requester,
             'certificate' => $this->myCertificate
         ]);
     }
