@@ -15,9 +15,9 @@ class CertificateManager
     private ?string $myCertificate = null;
     private ?string $myName = null;
     
-    public function __construct(?string $memberName = null)
+    public function __construct(?string $vouchmorphpartnerName = null)
     {
-        $this->myName = $memberName ?? getenv('VOUCHMORPH_PARTNER_NAME') ?: 'ZURUBANK';
+        $this->myName = $vouchmorphpartnerName ?? getenv('VOUCHMORPH_PARTNER_NAME') ?: 'ZURUBANK';
         
         // Load CA certificate (trust anchor)
         $caContent = getenv('VOUCHMORPH_CA_CERT_CONTENT');
