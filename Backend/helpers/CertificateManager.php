@@ -1,17 +1,18 @@
 <?php
 // zurubank/Backend/helpers/CertificateManager.php
+// EXACT COPY OF SACCUSSALIS WORKING VERSION
 
 /**
  * Certificate Manager - Visa/Mastercard style PKI
- * * Members present their certificate with each request.
+ * 
+ * Members present their certificate with each request.
  * Receivers verify against the trusted CA root.
  * NO manual key exchange needed for new members!
- * * BENCHMARKED AGAINST SACCUSSALIS WORKING VERSION
  */
 class CertificateManager
 {
     private ?string $caCert = null;
-    private ?string $myPrivateKey = null;  // Store as string, not resource (matches SACCUSSALIS)
+    private ?string $myPrivateKey = null;
     private ?string $myCertificate = null;
     private ?string $myName = null;
     
@@ -22,10 +23,7 @@ class CertificateManager
         // Load CA certificate (trust anchor)
         $caContent = getenv('VOUCHMORPH_CA_CERT_CONTENT');
         if ($caContent) {
-            if (is_array($caContent)) {
-                $caContent = reset($caContent);
-            }
-            $this->caCert = str_replace(['\\n', '\n'], "\n", (string)$caContent);
+            $this->caCert = str_replace(['\\n', '\n'], "\n", $caContent);
             error_log("CertificateManager: CA certificate loaded for {$this->myName}");
         } else {
             error_log("CertificateManager: WARNING - No CA certificate found for {$this->myName}");
@@ -34,33 +32,7 @@ class CertificateManager
         // Load this member's private key
         $privateKeyContent = getenv($this->myName . '_PRIVATE_KEY_CONTENT');
         if ($privateKeyContent) {
-            // CRITICAL: Type guard against environment arrays or structures
-            if (is_array($privateKeyContent)) {
-                $privateKeyContent = reset($privateKeyContent);
-            }
-            
-            $privateKeyContent = (string)$privateKeyContent;
-            $privateKeyContent = str_replace(['\\n', '\n'], "\n", $privateKeyContent);
-            $privateKeyContent = trim($privateKeyContent);
-            
-            // Format raw content safely into an OpenSSL-compliant key block
-            if (strpos($privateKeyContent, '-----BEGIN') === false) {
-                error_log("CertificateManager: Raw key detected. Applying standard headers.");
-                $privateKeyContent = "-----BEGIN PRIVATE KEY-----\n" . 
-                                     chunk_split($privateKeyContent, 64, "\n") . 
-                                     "-----END PRIVATE KEY-----\n";
-            } else {
-                // Ensure existing PEM structural chunks have clean 64-character line breaks
-                preg_match('/-----BEGIN (.*?)-----\s+(.*?)\s+-----END \\1-----/s', $privateKeyContent, $matches);
-                if (isset($matches)) {
-                    $body = preg_replace('/\s+/', '', (string)$matches);
-                    $privateKeyContent = "-----BEGIN {$matches}-----\n" . 
-                                         chunk_split($body, 64, "\n") . 
-                                         "-----END {$matches}-----\n";
-                }
-            }
-            
-            $this->myPrivateKey = $privateKeyContent;
+            $this->myPrivateKey = str_replace(['\\n', '\n'], "\n", $privateKeyContent);
             error_log("CertificateManager: Private key loaded for {$this->myName}");
         } else {
             error_log("CertificateManager: WARNING - No private key found for {$this->myName}");
@@ -69,46 +41,11 @@ class CertificateManager
         // Load this member's certificate
         $certContent = getenv($this->myName . '_CERT_CONTENT');
         if ($certContent) {
-            if (is_array($certContent)) {
-                $certContent = reset($certContent);
-            }
-            $this->myCertificate = str_replace(['\\n', '\n'], "\n", (string)$certContent);
+            $this->myCertificate = str_replace(['\\n', '\n'], "\n", $certContent);
             error_log("CertificateManager: Certificate loaded for {$this->myName}");
         } else {
             error_log("CertificateManager: WARNING - No certificate found for {$this->myName}");
         }
-    }
-    
-    /**
-     * Get CA certificate (trust anchor)
-     */
-    public function getCACertificate(): ?string
-    {
-        return $this->caCert;
-    }
-    
-    /**
-     * Get this member's certificate
-     */
-    public function getMyCertificate(): ?string
-    {
-        return $this->myCertificate;
-    }
-    
-    /**
-     * Get this member's private key (as string)
-     */
-    public function getMyPrivateKey(): ?string
-    {
-        return $this->myPrivateKey;
-    }
-    
-    /**
-     * Check if CertificateManager is properly configured
-     */
-    public function isConfigured(): bool
-    {
-        return ($this->caCert !== null && $this->myPrivateKey !== null && $this->myCertificate !== null);
     }
     
     /**
@@ -138,12 +75,9 @@ class CertificateManager
         exec($expiryCmd, $expiryOutput);
         foreach ($expiryOutput as $line) {
             if (preg_match('/notAfter=(.*)/', $line, $matches)) {
-                // CRITICAL FIX: Cast string target explicitly from match capture group
-                $dateString = trim((string)$matches);
-                $expiryDate = strtotime($dateString);
-                
-                if ($expiryDate === false || $expiryDate < time()) {
-                    error_log("CertificateManager: Certificate has expired or has an invalid date structure");
+                $expiryDate = strtotime($matches[1]);
+                if ($expiryDate < time()) {
+                    error_log("CertificateManager: Certificate has expired");
                     $result = false;
                 }
             }
@@ -208,7 +142,7 @@ class CertificateManager
             return ['verified' => false, 'message' => 'Cannot extract public key', 'requester' => $requester];
         }
         
-        // Step 3: Prepare payload for verification (remove signature and certificate)
+        // Step 3: Prepare payload for verification
         $payloadToVerify = $request;
         unset($payloadToVerify['signature']);
         unset($payloadToVerify['certificate']);
@@ -243,7 +177,6 @@ class CertificateManager
     
     /**
      * Create signed request with certificate (for outgoing)
-     * This matches SACCUSSALIS implementation
      */
     public function createSignedRequest(array $payload, string $requester): array
     {
@@ -252,37 +185,24 @@ class CertificateManager
             return $payload;
         }
         
-        // CRITICAL: Must include timestamp and requester in the signed payload
         $timestamp = time();
         $payloadWithTimestamp = array_merge($payload, ['timestamp' => $timestamp]);
         ksort($payloadWithTimestamp);
         
         $jsonToSign = json_encode($payloadWithTimestamp, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-        
-        error_log("CertificateManager: Signing payload for {$requester}");
-        
         $signature = '';
         $keyResource = openssl_pkey_get_private($this->myPrivateKey);
-        
-        if (!$keyResource) {
-            error_log("CertificateManager: Failed to load private key for signing - " . openssl_error_string());
-            return $payload;
-        }
-        
-        $signResult = openssl_sign($jsonToSign, $signature, $keyResource, OPENSSL_ALGO_SHA256);
-        
-        if (!$signResult) {
-            error_log("CertificateManager: Failed to sign payload - " . openssl_error_string());
-            return $payload;
-        }
-        
-        $encodedSignature = base64_encode($signature);
-        error_log("CertificateManager: Generated signature length: " . strlen($encodedSignature));
+        openssl_sign($jsonToSign, $signature, $keyResource, OPENSSL_ALGO_SHA256);
         
         return array_merge($payloadWithTimestamp, [
-            'signature' => $encodedSignature,
+            'signature' => base64_encode($signature),
             'requester' => $requester,
             'certificate' => $this->myCertificate
         ]);
+    }
+    
+    public function isConfigured(): bool
+    {
+        return ($this->caCert !== null && $this->myPrivateKey !== null && $this->myCertificate !== null);
     }
 }
