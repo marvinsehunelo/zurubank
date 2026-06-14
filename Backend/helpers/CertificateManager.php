@@ -3,156 +3,70 @@
 
 /**
  * Certificate Manager - Visa/Mastercard style PKI
- * 
- * Members present their certificate with each request.
- * Receivers verify against the trusted CA root.
- * NO manual key exchange needed for new members!
+ * Uses certificate-based authentication, NOT RSA key exchange
  */
 class CertificateManager
 {
     private ?string $caCert = null;
-    private $myPrivateKey = null;  // Store as resource
+    private $myPrivateKey = null;
     private ?string $myCertificate = null;
     private ?string $myName = null;
     
     public function __construct(?string $memberName = null)
     {
-        // Use VOUCHMORPH_PARTNER_NAME as the primary source
-        $this->myName = $memberName ?? getenv('VOUCHMORPH_PARTNER_NAME') ?: (getenv('MEMBER_NAME') ?: 'ZURUBANK');
+        // Get partner name from environment
+        $this->myName = $memberName ?? getenv('VOUCHMORPH_PARTNER_NAME') ?: 'ZURUBANK';
         
         error_log("CertificateManager: Initialized for {$this->myName}");
         
-        // Load CA certificate (trust anchor)
+        // Load CA certificate (trust anchor) - REQUIRED
         $caContent = getenv('VOUCHMORPH_CA_CERT_CONTENT');
-        if ($caContent) {
+        if (!$caContent) {
+            error_log("CertificateManager: FATAL - No VOUCHMORPH_CA_CERT_CONTENT found");
+            $this->caCert = null;
+        } else {
             $this->caCert = $this->normalizePemContent($caContent);
             error_log("CertificateManager: CA certificate loaded");
-        } else {
-            error_log("CertificateManager: WARNING - No CA certificate found");
         }
         
-        // Load this member's private key (supports encrypted keys)
-        $privateKeyContent = $this->getPrivateKeyFromEnv();
-        $passphrase = $this->getPrivateKeyPassphrase();
-        
-        if ($privateKeyContent) {
-            $this->myPrivateKey = $this->loadPrivateKey($privateKeyContent, $passphrase);
-            if ($this->myPrivateKey) {
-                error_log("CertificateManager: Private key loaded successfully for {$this->myName}");
-            } else {
-                error_log("CertificateManager: ERROR - Failed to load private key for {$this->myName}");
-            }
+        // Load this member's private key - use CERTIFICATE method variables
+        $privateKeyContent = getenv($this->myName . '_PRIVATE_KEY_CONTENT');
+        if (!$privateKeyContent) {
+            error_log("CertificateManager: ERROR - No {$this->myName}_PRIVATE_KEY_CONTENT found");
+            $this->myPrivateKey = null;
         } else {
-            error_log("CertificateManager: WARNING - No private key found for {$this->myName}");
+            error_log("CertificateManager: Found private key in {$this->myName}_PRIVATE_KEY_CONTENT");
+            $privateKeyContent = $this->normalizePemContent($privateKeyContent);
+            $this->myPrivateKey = openssl_pkey_get_private($privateKeyContent);
+            
+            if (!$this->myPrivateKey) {
+                $error = openssl_error_string();
+                error_log("CertificateManager: Failed to load private key: " . $error);
+                
+                // Check if it's encrypted
+                if (strpos($privateKeyContent, 'ENCRYPTED') !== false || strpos($privateKeyContent, 'Proc-Type: 4,ENCRYPTED') !== false) {
+                    error_log("CertificateManager: Private key is ENCRYPTED. You need to decrypt it or provide passphrase.");
+                    error_log("CertificateManager: Run: openssl rsa -in encrypted.key -out decrypted.key");
+                }
+            } else {
+                error_log("CertificateManager: Private key loaded successfully");
+            }
         }
         
         // Load this member's certificate
-        $certContent = $this->getCertificateFromEnv();
-        
-        if ($certContent) {
+        $certContent = getenv($this->myName . '_CERT_CONTENT');
+        if (!$certContent) {
+            error_log("CertificateManager: ERROR - No {$this->myName}_CERT_CONTENT found");
+            $this->myCertificate = null;
+        } else {
             $this->myCertificate = $this->normalizePemContent($certContent);
             error_log("CertificateManager: Certificate loaded for {$this->myName}");
-        } else {
-            error_log("CertificateManager: WARNING - No certificate found for {$this->myName}");
-        }
-    }
-    
-    /**
-     * Get private key passphrase from environment
-     */
-    private function getPrivateKeyPassphrase(): ?string
-    {
-        $possibleNames = [
-            $this->myName . '_PRIVATE_KEY_PASSPHRASE',
-            $this->myName . '_KEY_PASSWORD',
-            'ZURUBANK_PRIVATE_KEY_PASSPHRASE',
-            'ZURUBANK_KEY_PASSWORD',
-            'PRIVATE_KEY_PASSPHRASE',
-            'KEY_PASSPHRASE'
-        ];
-        
-        foreach ($possibleNames as $name) {
-            $value = getenv($name);
-            if ($value) {
-                error_log("CertificateManager: Found private key passphrase in env: {$name}");
-                return $value;
-            }
         }
         
-        return null;
-    }
-    
-    /**
-     * Get private key from environment (supports multiple formats)
-     */
-    private function getPrivateKeyFromEnv(): ?string
-    {
-        // Try different possible environment variable names
-        $possibleNames = [
-            $this->myName . '_PRIVATE_KEY_CONTENT',
-            $this->myName . '_PRIVATE_KEY',
-            'ZURUBANK_PRIVATE_KEY_CONTENT',
-            'ZURUBANK_PRIVATE_KEY',
-            'ZURUBANK_PRIVATE_KEY_BASE64',
-            'PRIVATE_KEY_CONTENT',
-            'PRIVATE_KEY'
-        ];
-        
-        foreach ($possibleNames as $name) {
-            $value = getenv($name);
-            if ($value) {
-                error_log("CertificateManager: Found private key in env: {$name}");
-                
-                // Check if it's base64 encoded
-                if (strpos($name, 'BASE64') !== false || (strpos($value, '-----BEGIN') === false && strlen($value) > 100 && !preg_match('/\n/', $value))) {
-                    error_log("CertificateManager: Attempting to decode as base64");
-                    $decoded = base64_decode($value);
-                    if ($decoded && (strpos($decoded, 'BEGIN PRIVATE KEY') !== false || strpos($decoded, 'BEGIN RSA PRIVATE KEY') !== false || strpos($decoded, 'BEGIN ENCRYPTED PRIVATE KEY') !== false)) {
-                        error_log("CertificateManager: Successfully decoded base64 private key");
-                        return $decoded;
-                    }
-                }
-                
-                return $value;
-            }
-        }
-        
-        return null;
-    }
-    
-    /**
-     * Get certificate from environment
-     */
-    private function getCertificateFromEnv(): ?string
-    {
-        $possibleNames = [
-            $this->myName . '_CERT_CONTENT',
-            $this->myName . '_CERT',
-            'ZURUBANK_CERT_CONTENT',
-            'ZURUBANK_CERT',
-            'ZURUBANK_CERT_BASE64',
-            'CERTIFICATE_CONTENT',
-            'CERTIFICATE'
-        ];
-        
-        foreach ($possibleNames as $name) {
-            $value = getenv($name);
-            if ($value) {
-                error_log("CertificateManager: Found certificate in env: {$name}");
-                
-                if (strpos($name, 'BASE64') !== false || (strpos($value, '-----BEGIN') === false && strlen($value) > 100 && !preg_match('/\n/', $value))) {
-                    $decoded = base64_decode($value);
-                    if ($decoded && strpos($decoded, 'BEGIN CERTIFICATE') !== false) {
-                        error_log("CertificateManager: Successfully decoded base64 certificate");
-                        return $decoded;
-                    }
-                }
-                
-                return $value;
-            }
-        }
-        
-        return null;
+        // Log configuration status
+        error_log("CertificateManager: CA Cert: " . ($this->caCert ? "YES" : "NO"));
+        error_log("CertificateManager: Private Key: " . ($this->myPrivateKey ? "YES" : "NO"));
+        error_log("CertificateManager: Certificate: " . ($this->myCertificate ? "YES" : "NO"));
     }
     
     /**
@@ -160,12 +74,12 @@ class CertificateManager
      */
     private function normalizePemContent(string $content): string
     {
-        // First, replace any escaped newlines
+        // Replace escaped newlines
         $content = str_replace(['\\n', '\\r', '\r'], "\n", $content);
         $content = str_replace("\r", "", $content);
         $content = trim($content);
         
-        // Check if it's already in PEM format
+        // Ensure proper PEM format
         if (preg_match('/-----BEGIN (.*?)-----/', $content)) {
             $content = preg_replace('/-----BEGIN [^-]+-----/', "$0\n", $content);
             $content = preg_replace('/-----END [^-]+-----/', "\n$0\n", $content);
@@ -182,119 +96,18 @@ class CertificateManager
     }
     
     /**
-     * Load private key with OpenSSL 3.x compatibility (supports encrypted keys)
+     * Check if CertificateManager is properly configured
      */
-    private function loadPrivateKey(string $keyContent, ?string $passphrase = null)
+    public function isConfigured(): bool
     {
-        // First, normalize the content
-        $keyContent = $this->normalizePemContent($keyContent);
-        
-        error_log("CertificateManager: Private key length: " . strlen($keyContent));
-        error_log("CertificateManager: Private key first 50 chars: " . substr($keyContent, 0, 50));
-        
-        // Check if this is an encrypted private key
-        if (strpos($keyContent, 'ENCRYPTED PRIVATE KEY') !== false) {
-            error_log("CertificateManager: Detected ENCRYPTED private key format");
-            
-            if (!$passphrase) {
-                error_log("CertificateManager: ERROR - Encrypted private key requires a passphrase but none provided");
-                error_log("CertificateManager: Please set " . $this->myName . "_PRIVATE_KEY_PASSPHRASE environment variable");
-                return null;
-            }
-            
-            error_log("CertificateManager: Using passphrase to decrypt private key");
-            $privateKey = openssl_pkey_get_private($keyContent, $passphrase);
-            if ($privateKey) {
-                error_log("CertificateManager: Encrypted private key loaded successfully with passphrase");
-                return $privateKey;
-            }
-            error_log("CertificateManager: Failed to load encrypted private key: " . openssl_error_string());
+        $configured = ($this->caCert !== null && $this->myPrivateKey !== null && $this->myCertificate !== null);
+        if (!$configured) {
+            error_log("CertificateManager: NOT fully configured");
+            error_log("  - caCert: " . ($this->caCert ? "YES" : "NO"));
+            error_log("  - myPrivateKey: " . ($this->myPrivateKey ? "YES" : "NO"));
+            error_log("  - myCertificate: " . ($this->myCertificate ? "YES" : "NO"));
         }
-        
-        // Check for PKCS#8 with BEGIN PRIVATE KEY (might be encrypted or not)
-        if (strpos($keyContent, 'BEGIN PRIVATE KEY') !== false) {
-            // Try without passphrase first
-            $privateKey = openssl_pkey_get_private($keyContent);
-            if ($privateKey) {
-                error_log("CertificateManager: Private key loaded as PKCS#8 (unencrypted)");
-                return $privateKey;
-            }
-            
-            // If that fails and we have a passphrase, try with passphrase
-            if ($passphrase) {
-                $privateKey = openssl_pkey_get_private($keyContent, $passphrase);
-                if ($privateKey) {
-                    error_log("CertificateManager: PKCS#8 private key loaded with passphrase");
-                    return $privateKey;
-                }
-            }
-            
-            error_log("CertificateManager: PKCS#8 load failed: " . openssl_error_string());
-        }
-        
-        // Try as PKCS#1 (RSA PRIVATE KEY)
-        if (strpos($keyContent, 'BEGIN RSA PRIVATE KEY') !== false) {
-            $privateKey = openssl_pkey_get_private($keyContent);
-            if ($privateKey) {
-                error_log("CertificateManager: Private key loaded as PKCS#1 (RSA)");
-                return $privateKey;
-            }
-            
-            if ($passphrase) {
-                $privateKey = openssl_pkey_get_private($keyContent, $passphrase);
-                if ($privateKey) {
-                    error_log("CertificateManager: PKCS#1 private key loaded with passphrase");
-                    return $privateKey;
-                }
-            }
-            
-            error_log("CertificateManager: PKCS#1 load failed: " . openssl_error_string());
-        }
-        
-        // Try using openssl command line to convert
-        $tempFile = tempnam(sys_get_temp_dir(), 'zurukey_');
-        file_put_contents($tempFile, $keyContent);
-        
-        // Try to convert encrypted PKCS#8 to unencrypted PKCS#1
-        if ($passphrase) {
-            $cmd = "openssl pkcs8 -in " . escapeshellarg($tempFile) . " -nocrypt -out " . escapeshellarg($tempFile . '_conv') . " -passin pass:" . escapeshellarg($passphrase) . " 2>&1";
-            exec($cmd, $output, $returnCode);
-            
-            if ($returnCode === 0 && file_exists($tempFile . '_conv')) {
-                $converted = file_get_contents($tempFile . '_conv');
-                $privateKey = openssl_pkey_get_private($converted);
-                if ($privateKey) {
-                    error_log("CertificateManager: Private key loaded after pkcs8 conversion");
-                    unlink($tempFile);
-                    unlink($tempFile . '_conv');
-                    return $privateKey;
-                }
-            }
-        }
-        
-        // Try RSA conversion
-        $cmd = "openssl rsa -in " . escapeshellarg($tempFile) . " -out " . escapeshellarg($tempFile . '_conv') . " 2>&1";
-        if ($passphrase) {
-            $cmd = "openssl rsa -in " . escapeshellarg($tempFile) . " -out " . escapeshellarg($tempFile . '_conv') . " -passin pass:" . escapeshellarg($passphrase) . " 2>&1";
-        }
-        exec($cmd, $output, $returnCode);
-        
-        if ($returnCode === 0 && file_exists($tempFile . '_conv')) {
-            $converted = file_get_contents($tempFile . '_conv');
-            $privateKey = openssl_pkey_get_private($converted);
-            if ($privateKey) {
-                error_log("CertificateManager: Private key loaded after RSA conversion");
-                unlink($tempFile);
-                unlink($tempFile . '_conv');
-                return $privateKey;
-            }
-        }
-        
-        unlink($tempFile);
-        if (file_exists($tempFile . '_conv')) unlink($tempFile . '_conv');
-        
-        error_log("CertificateManager: All private key loading attempts failed");
-        return null;
+        return $configured;
     }
     
     /**
@@ -322,14 +135,6 @@ class CertificateManager
     }
     
     /**
-     * Check if CertificateManager is properly configured
-     */
-    public function isConfigured(): bool
-    {
-        return ($this->caCert !== null && $this->myPrivateKey !== null && $this->myCertificate !== null);
-    }
-    
-    /**
      * Verify a certificate against the trusted CA root
      */
     public function verifyCertificate(string $certificatePem): bool
@@ -351,6 +156,7 @@ class CertificateManager
         exec($cmd, $output, $returnCode);
         $result = ($returnCode === 0);
         
+        // Check expiration
         $expiryCmd = "openssl x509 -in " . escapeshellarg($tempCert) . " -noout -enddate 2>&1";
         exec($expiryCmd, $expiryOutput);
         foreach ($expiryOutput as $line) {
@@ -389,7 +195,6 @@ class CertificateManager
             return $this->normalizePemContent($publicKey);
         }
         
-        error_log("CertificateManager: Failed to extract public key from certificate");
         return null;
     }
     
@@ -421,6 +226,7 @@ class CertificateManager
             return ['verified' => false, 'message' => 'Cannot extract public key', 'requester' => $requester];
         }
         
+        // Prepare payload for verification (remove signature and certificate)
         $payloadToVerify = [];
         foreach ($request as $key => $value) {
             if (!in_array($key, ['signature', 'certificate'])) {
