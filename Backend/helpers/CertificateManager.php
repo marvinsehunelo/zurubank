@@ -1,6 +1,6 @@
 <?php
 // zurubank/Backend/helpers/CertificateManager.php
-// EXACT COPY OF SACCUSSALIS WORKING VERSION
+// EXACT COPY OF SACCUSSALIS WORKING VERSION - WITH PUBLIC PROPERTIES
 
 /**
  * Certificate Manager - Visa/Mastercard style PKI
@@ -11,9 +11,9 @@
  */
 class CertificateManager
 {
-    private ?string $caCert = null;
-    private ?string $myPrivateKey = null;
-    private ?string $myCertificate = null;
+    public ?string $caCert = null;           // Changed to public
+    public ?string $myPrivateKey = null;      // Changed to public
+    public ?string $myCertificate = null;     // Changed to public
     private ?string $myName = null;
     
     public function __construct(?string $memberName = null)
