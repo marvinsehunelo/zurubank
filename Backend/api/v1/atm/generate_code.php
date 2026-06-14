@@ -12,11 +12,9 @@ require_once __DIR__ . '/../../../helpers/CertificateManager.php';
 // Increase memory and buffer limits for large responses
 ini_set('memory_limit', '512M');
 ini_set('output_buffering', '4096');
-ini_set('zlib.output_compression', 'On');
-ini_set('zlib.output_compression_level', '6');
+
 
 header('Content-Type: application/json');
-header('Content-Encoding: gzip');
 
 if (ob_get_level()) {
     ob_end_clean();
