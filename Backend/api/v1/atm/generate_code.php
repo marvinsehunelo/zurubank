@@ -167,6 +167,9 @@ try {
         }
     }
 
+    // HARD CODE created_by = 2
+    $createdBy = 2;
+    
     // Expiry (24 hours from now)
     $voucherExpiresAt = date('Y-m-d H:i:s', strtotime('+24 hours'));
     $satExpiresAt = $satPurchased ? date('Y-m-d H:i:s', strtotime('+24 hours')) : null;
@@ -208,7 +211,7 @@ try {
         VALUES (
             :amount,
             :currency,
-            1,
+            :created_by,
             :recipient_phone,
             NOW(),
             :voucher_number,
@@ -240,6 +243,7 @@ try {
     $stmt->execute([
         ':amount'                 => $amount,
         ':currency'               => $currency,
+        ':created_by'             => $createdBy,  // HARD CODED = 2
         ':recipient_phone'        => $normalizedPhone,
         ':voucher_number'         => $voucherNumber,
         ':voucher_pin'            => $voucherPin,
@@ -262,7 +266,7 @@ try {
         throw new Exception("Failed to create swap voucher");
     }
 
-    // Create voucher_cashout_details table if not exists (CORRECT COLUMNS)
+    // Create voucher_cashout_details table if not exists
     $pdo->exec("
         CREATE TABLE IF NOT EXISTS voucher_cashout_details (
             id SERIAL PRIMARY KEY,
@@ -316,7 +320,7 @@ try {
         . "⏰ **Valid for 24 hours only**\n"
         . "🔒 Keep this information secure!";
 
-    // Insert into voucher_cashout_details (CORRECT COLUMNS)
+    // Insert into voucher_cashout_details (redeemed_by columns are NULL by default)
     $stmtDetails = $pdo->prepare("
         INSERT INTO voucher_cashout_details (
             voucher_number,
@@ -365,7 +369,7 @@ try {
 
     $detailsId = $stmtDetails->fetchColumn();
 
-    // Create audit_logs table if not exists (CORRECT COLUMNS)
+    // Create audit_logs table if not exists
     $pdo->exec("
         CREATE TABLE IF NOT EXISTS audit_logs (
             id SERIAL PRIMARY KEY,
@@ -388,7 +392,7 @@ try {
     $ipAddress = $_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['REMOTE_ADDR'] ?? null;
     $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? null;
     
-    // Audit log (CORRECT COLUMNS)
+    // Audit log
     $auditStmt = $pdo->prepare("
         INSERT INTO audit_logs (
             entity, 
