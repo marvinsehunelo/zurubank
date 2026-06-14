@@ -5,13 +5,14 @@
 // INCLUDES created_by = 2, EXCLUDES redeemed_by
 // --------------------------------------------------
 
+// Force PHP to route all warnings/deprecations to logs only, maintaining pure JSON responses
+ini_set('display_errors', '0');
+ini_set('memory_limit', '512M');
+ini_set('output_buffering', '4096');
+
 require_once __DIR__ . '/../../../config/db.php';
 require_once __DIR__ . '/../../../helpers/crypto.php';
 require_once __DIR__ . '/../../../helpers/CertificateManager.php';
-
-// Increase memory and buffer limits for large responses
-ini_set('memory_limit', '512M');
-ini_set('output_buffering', '4096');
 
 header('Content-Type: application/json');
 
@@ -21,7 +22,7 @@ if (ob_get_level()) {
 ob_start();
 
 try {
-    $input = json_decode(file_get_contents('php://input'), true);
+    $input = json_decode(file_get_contents('php://input'), true) ?: [];
     error_log("=== ZURUBANK generate_code.php RECEIVED ===");
     error_log("Payload: " . json_encode($input));
 
@@ -31,6 +32,7 @@ try {
     
     if (!isset($input['certificate'])) {
         error_log("ZURUBANK generate_code: No certificate provided");
+        if (ob_get_length()) ob_clean();
         echo json_encode([
             'success' => false,
             'token_generated' => false,
@@ -50,6 +52,7 @@ try {
     
     if (!$isValid) {
         error_log("ZURUBANK generate_code: Certificate verification failed");
+        if (ob_get_length()) ob_clean();
         echo json_encode([
             'success' => false,
             'token_generated' => false,
@@ -67,31 +70,38 @@ try {
 
     $pdo->beginTransaction();
 
-    // Extract payload fields
-    $beneficiaryPhone = trim($input['beneficiary_phone'] ?? $input['phone'] ?? '');
+    // Safe PHP 8.4 scalar extractions bypassing null trim deprecations
+    $beneficiaryPhone = trim((string)($input['beneficiary_phone'] ?? $input['phone'] ?? ''));
     $amount = floatval($input['amount'] ?? 0);
-    $currency = trim($input['currency'] ?? 'BWP');
-    $reference = trim($input['reference'] ?? '');
+    $currency = trim((string)($input['currency'] ?? 'BWP'));
+    $reference = trim((string)($input['reference'] ?? ''));
     
-    // Extract source information
     $sourceInstitution = null;
     $sourceHoldReference = null;
 
-    if (isset($input['source_hold'])) {
+    if (isset($input['source_hold']) && is_array($input['source_hold'])) {
         $sourceInstitution = $input['source_hold']['source'] ?? null;
         $sourceHoldReference = $input['source_hold']['hold_reference'] ?? $input['source_hold']['reference'] ?? null;
     }
 
     if (empty($sourceInstitution)) {
-        $sourceInstitution = trim($input['source_institution'] ?? 'SACCUSSALIS');
+        $sourceInstitution = trim((string)($input['source_institution'] ?? 'SACCUSSALIS'));
+    } else {
+        $sourceInstitution = trim((string)$sourceInstitution);
     }
+    
     if (empty($sourceHoldReference)) {
-        $sourceHoldReference = trim($input['source_hold_reference'] ?? null);
+        $sourceHoldReference = trim((string)($input['source_hold_reference'] ?? ''));
+        if ($sourceHoldReference === '') {
+            $sourceHoldReference = null;
+        }
+    } else {
+        $sourceHoldReference = trim((string)$sourceHoldReference);
     }
 
     $origin = 'swap';
-    $sourceAssetType = trim($input['source_asset_type'] ?? null);
-    $codeHash = trim($input['code_hash'] ?? '');
+    $sourceAssetType = trim((string)($input['source_asset_type'] ?? ''));
+    $codeHash = trim((string)($input['code_hash'] ?? ''));
     $idempotencyKey = $input['idempotency_key'] ?? $input['idempotencyKey'] ?? $reference;
     $satPurchased = $input['sat_purchased'] ?? null;
     $satFeePaidBy = $input['sat_fee_paid_by'] ?? null;
@@ -122,7 +132,7 @@ try {
                 'timestamp' => time()
             ];
             
-            // INLINED SAFE SIGNING: Avoids crypto.php redeclaration issues completely
+            if (ob_get_length()) ob_clean();
             $signedPayload = $certManager->createSignedRequest($duplicateResponse, 'ZURUBANK');
             echo json_encode($signedPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
             exit;
@@ -134,9 +144,9 @@ try {
     $satExpiresAt = $satPurchased ? date('Y-m-d H:i:s', strtotime('+24 hours')) : null;
 
     // Generate codes
-    $voucherNumber = str_pad(random_int(0, 999999999999), 12, '0', STR_PAD_LEFT);
-    $voucherPin    = str_pad(random_int(0, 999999), 6, '0', STR_PAD_LEFT);
-    $authCode = str_pad(random_int(0, 99999999), 8, '0', STR_PAD_LEFT);
+    $voucherNumber = str_pad((string)random_int(0, 999999999999), 12, '0', STR_PAD_LEFT);
+    $voucherPin    = str_pad((string)random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+    $authCode = str_pad((string)random_int(0, 99999999), 8, '0', STR_PAD_LEFT);
     $qrCode = "ZURUBANK:{$voucherNumber}:{$authCode}";
     $barcode = $voucherNumber;
 
@@ -190,7 +200,7 @@ try {
         ':reference'              => $reference,
         ':source_institution'     => $sourceInstitution,
         ':source_hold_reference'  => $sourceHoldReference,
-        ':code_hash'              => $codeHash ?: $idempotencyKey
+        ':code_hash'              => $codeHash ?: (string)$idempotencyKey
     ]);
 
     $voucherId = $stmt->fetchColumn();
@@ -281,7 +291,7 @@ try {
 
     error_log("ZURUBANK: Voucher generated successfully - Number: {$voucherNumber}");
 
-    // Response
+    // Response Structure
     $responsePayload = [
         'status' => 'SUCCESS',
         'token_generated' => true,
@@ -303,7 +313,11 @@ try {
     
     error_log("ZURUBANK: Sending signed response");
     
-    // INLINED SAFE SIGNING: Bypass old logic inside crypto.php entirely
+    // Clear out any structural warning buffer artifacts right before printing response
+    if (ob_get_length()) {
+        ob_clean();
+    }
+    
     $signedPayload = $certManager->createSignedRequest($responsePayload, 'ZURUBANK');
     echo json_encode($signedPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     exit;
@@ -321,6 +335,10 @@ try {
         'error' => $e->getMessage(),
         'timestamp' => time()
     ];
+    
+    if (ob_get_length()) {
+        ob_clean();
+    }
     
     try {
         $fallbackCertManager = new CertificateManager('ZURUBANK');
