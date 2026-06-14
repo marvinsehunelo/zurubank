@@ -50,6 +50,9 @@ class CertificateManager
     /**
      * Verify a certificate against the trusted CA root
      */
+    /**
+     * Verify a certificate against the trusted CA root
+     */
     public function verifyCertificate(string $certificatePem): bool
     {
         if (!$this->caCert) {
@@ -71,12 +74,17 @@ class CertificateManager
         
         // Also check certificate is not expired
         $expiryCmd = "openssl x509 -in " . escapeshellarg($tempCert) . " -noout -enddate 2>&1";
+        $expiryOutput = []; // Explicitly initialize array
         exec($expiryCmd, $expiryOutput);
+        
         foreach ($expiryOutput as $line) {
-            if (preg_match('/notAfter=(.*)/', $line, $matches)) {
-                $expiryDate = strtotime($matches);
-                if ($expiryDate < time()) {
-                    error_log("CertificateManager: Certificate has expired");
+            // Ensure $line is processed as a pure string
+            if (is_string($line) && preg_match('/notAfter=(.*)/', $line, $matches)) {
+                $dateString = trim((string)$matches);
+                $expiryDate = strtotime($dateString);
+                
+                if ($expiryDate === false || $expiryDate < time()) {
+                    error_log("CertificateManager: Certificate has expired or has an invalid date: " . $dateString);
                     $result = false;
                 }
             }
