@@ -4,16 +4,15 @@
 
 /**
  * Certificate Manager - Visa/Mastercard style PKI
- * 
- * Members present their certificate with each request.
+ * * Members present their certificate with each request.
  * Receivers verify against the trusted CA root.
  * NO manual key exchange needed for new members!
  */
 class CertificateManager
 {
-    public ?string $caCert = null;           // Changed to public
-    public ?string $myPrivateKey = null;      // Changed to public
-    public ?string $myCertificate = null;     // Changed to public
+    public ?string $caCert = null;           
+    public ?string $myPrivateKey = null;      
+    public ?string $myCertificate = null;     
     private ?string $myName = null;
     
     public function __construct(?string $memberName = null)
@@ -75,7 +74,7 @@ class CertificateManager
         exec($expiryCmd, $expiryOutput);
         foreach ($expiryOutput as $line) {
             if (preg_match('/notAfter=(.*)/', $line, $matches)) {
-                $expiryDate = strtotime($matches[1]);
+                $expiryDate = strtotime($matches);
                 if ($expiryDate < time()) {
                     error_log("CertificateManager: Certificate has expired");
                     $result = false;
@@ -191,7 +190,25 @@ class CertificateManager
         
         $jsonToSign = json_encode($payloadWithTimestamp, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         $signature = '';
+        
+        // Coercion Defense: Attempt to load key normally
         $keyResource = openssl_pkey_get_private($this->myPrivateKey);
+        
+        // Fallback: If it couldn't coerce, reformat the key with explicit padding headers 
+        if (!$keyResource) {
+            error_log("CertificateManager: Primary private key coercion failed. Attempting PEM header reconstruction wrapper fallback...");
+            $cleanKey = trim($this->myPrivateKey);
+            if (strpos($cleanKey, '-----BEGIN PRIVATE KEY-----') === false) {
+                $formattedKey = "-----BEGIN PRIVATE KEY-----\n" . wordwrap($cleanKey, 64, "\n", true) . "\n-----END PRIVATE KEY-----";
+                $keyResource = openssl_pkey_get_private($formattedKey);
+            }
+        }
+
+        if (!$keyResource) {
+            error_log("CertificateManager: CRITICAL ERROR - Private key cannot be coerced by OpenSSL engine. Check environment syntax format.");
+            return $payload;
+        }
+        
         openssl_sign($jsonToSign, $signature, $keyResource, OPENSSL_ALGO_SHA256);
         
         return array_merge($payloadWithTimestamp, [
