@@ -108,7 +108,7 @@ try {
         $sourceHoldReference = trim($input['source_hold_reference'] ?? $input['hold_reference'] ?? null);
     }
 
-    // Origin is ALWAYS 'swap' for cross-border transactions (based on your database)
+    // Origin is ALWAYS 'swap' for cross-border transactions
     $origin = 'swap';
     
     // Source asset type (if provided)
@@ -130,7 +130,7 @@ try {
         throw new Exception("beneficiary_phone and valid amount are required");
     }
 
-    // Normalize phone number (keep + prefix as in your data)
+    // Normalize phone number (keep + prefix)
     $normalizedPhone = $beneficiaryPhone;
     if (!str_starts_with($normalizedPhone, '+')) {
         $normalizedPhone = '+' . $normalizedPhone;
@@ -175,6 +175,10 @@ try {
     $voucherNumber = str_pad(random_int(0, 999999999999), 12, '0', STR_PAD_LEFT);
     $voucherPin    = str_pad(random_int(0, 999999), 6, '0', STR_PAD_LEFT);
     $authCode = str_pad(random_int(0, 99999999), 8, '0', STR_PAD_LEFT);
+    
+    // Generate QR code and barcode (simple format)
+    $qrCode = "ZURUBANK:{$voucherNumber}:{$authCode}";
+    $barcode = $voucherNumber;
 
     // Insert into instant_money_vouchers
     $stmt = $pdo->prepare("
@@ -258,31 +262,35 @@ try {
         throw new Exception("Failed to create swap voucher");
     }
 
-    // Create voucher_cashout_details table if not exists
+    // Create voucher_cashout_details table if not exists (CORRECT COLUMNS)
     $pdo->exec("
         CREATE TABLE IF NOT EXISTS voucher_cashout_details (
             id SERIAL PRIMARY KEY,
             voucher_number VARCHAR(255) NOT NULL UNIQUE,
             auth_code VARCHAR(50) UNIQUE NOT NULL,
+            qr_code TEXT,
+            barcode VARCHAR(255),
             amount NUMERIC(20,4) NOT NULL,
             currency VARCHAR(10) DEFAULT 'BWP',
             recipient_phone VARCHAR(50),
             instructions TEXT,
             expires_at TIMESTAMP NOT NULL,
             created_at TIMESTAMP DEFAULT NOW(),
+            redeemed_at TIMESTAMP,
+            redeemed_by_user_id INTEGER,
+            redeemed_by_atm VARCHAR(100),
+            redeemed_by_agent VARCHAR(100),
             reference VARCHAR(255),
-            source_institution VARCHAR(100),
-            requester VARCHAR(100),
-            signature_verified BOOLEAN DEFAULT FALSE,
-            verification_method VARCHAR(50)
+            source_institution VARCHAR(100)
         )
     ");
 
-    // Generate universal instructions
+    // Generate instructions
     $instructions = "🔐 **ZuruBank Cashout Voucher**\n\n"
         . "**Amount:** {$currency} {$amount}\n"
         . "**Voucher:** {$voucherNumber}\n"
         . "**PIN:** {$voucherPin}\n"
+        . "**Auth Code:** {$authCode}\n"
         . "**Expires:** " . date('d M Y H:i', strtotime($voucherExpiresAt)) . "\n\n"
         . "**How to cash out:**\n\n"
         . "🏧 **ATMs:**\n"
@@ -299,13 +307,22 @@ try {
         . "4. Provide PIN: {$voucherPin} when asked\n"
         . "5. Agent will process the cashout\n"
         . "6. Collect your cash and sign receipt\n\n"
+        . "📱 **Mobile App:**\n"
+        . "1. Open ZuruBank App\n"
+        . "2. Select 'Cashout Voucher'\n"
+        . "3. Enter voucher number: {$voucherNumber}\n"
+        . "4. Enter PIN: {$voucherPin}\n"
+        . "5. Funds will be sent to your linked wallet\n\n"
         . "⏰ **Valid for 24 hours only**\n"
         . "🔒 Keep this information secure!";
 
+    // Insert into voucher_cashout_details (CORRECT COLUMNS)
     $stmtDetails = $pdo->prepare("
         INSERT INTO voucher_cashout_details (
             voucher_number,
             auth_code,
+            qr_code,
+            barcode,
             amount,
             currency,
             recipient_phone,
@@ -313,14 +330,13 @@ try {
             expires_at,
             created_at,
             reference,
-            source_institution,
-            requester,
-            signature_verified,
-            verification_method
+            source_institution
         )
         VALUES (
             :voucher_number,
             :auth_code,
+            :qr_code,
+            :barcode,
             :amount,
             :currency,
             :recipient_phone,
@@ -328,10 +344,7 @@ try {
             :expires_at,
             NOW(),
             :reference,
-            :source_institution,
-            :requester,
-            :signature_verified,
-            :verification_method
+            :source_institution
         )
         RETURNING id
     ");
@@ -339,52 +352,76 @@ try {
     $stmtDetails->execute([
         ':voucher_number'  => $voucherNumber,
         ':auth_code'       => $authCode,
+        ':qr_code'         => $qrCode,
+        ':barcode'         => $barcode,
         ':amount'          => $amount,
         ':currency'        => $currency,
         ':recipient_phone' => $normalizedPhone,
         ':instructions'    => $instructions,
         ':expires_at'      => $voucherExpiresAt,
         ':reference'       => $reference,
-        ':source_institution' => $sourceInstitutionValue,
-        ':requester'       => $requester,
-        ':signature_verified' => $isValid ? 1 : 0,
-        ':verification_method' => 'certificate'
+        ':source_institution' => $sourceInstitutionValue
     ]);
 
     $detailsId = $stmtDetails->fetchColumn();
 
-    // Create audit logs table if needed
+    // Create audit_logs table if not exists (CORRECT COLUMNS)
     $pdo->exec("
         CREATE TABLE IF NOT EXISTS audit_logs (
             id SERIAL PRIMARY KEY,
-            entity_type VARCHAR(100),
+            entity VARCHAR(100),
             entity_id INTEGER,
             action VARCHAR(50),
             category VARCHAR(50),
             severity VARCHAR(20),
+            old_value TEXT,
+            new_value TEXT,
+            performed_at TIMESTAMP DEFAULT NOW(),
             performed_by VARCHAR(100),
-            performed_by_cert_verified BOOLEAN DEFAULT FALSE,
-            verification_method VARCHAR(50),
-            metadata JSONB,
-            performed_at TIMESTAMP DEFAULT NOW()
+            ip_address VARCHAR(50),
+            user_agent TEXT,
+            geo_location VARCHAR(100)
         )
     ");
 
-    // Audit log
+    // Get client IP and user agent
+    $ipAddress = $_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['REMOTE_ADDR'] ?? null;
+    $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? null;
+    
+    // Audit log (CORRECT COLUMNS)
     $auditStmt = $pdo->prepare("
-        INSERT INTO audit_logs 
-        (entity_type, entity_id, action, category, severity, performed_by, 
-         performed_by_cert_verified, verification_method, metadata, performed_at)
-        VALUES 
-        ('instant_money_vouchers', :entity_id, 'GENERATE', 'financial', 'info', :performed_by,
-         :cert_verified, :verification_method, :metadata, NOW())
+        INSERT INTO audit_logs (
+            entity, 
+            entity_id, 
+            action, 
+            category, 
+            severity, 
+            old_value, 
+            new_value, 
+            performed_at, 
+            performed_by, 
+            ip_address, 
+            user_agent, 
+            geo_location
+        )
+        VALUES (
+            'instant_money_vouchers', 
+            :entity_id, 
+            'GENERATE', 
+            'financial', 
+            'info', 
+            NULL, 
+            :new_value, 
+            NOW(), 
+            :performed_by, 
+            :ip_address, 
+            :user_agent, 
+            NULL
+        )
     ");
     $auditStmt->execute([
         'entity_id' => $voucherId,
-        'performed_by' => $requester,
-        'cert_verified' => $isValid ? 1 : 0,
-        'verification_method' => 'certificate',
-        'metadata' => json_encode([
+        'new_value' => json_encode([
             'signature_verified' => $isValid,
             'amount' => $amount,
             'currency' => $currency,
@@ -394,7 +431,10 @@ try {
             'origin' => $origin,
             'source_institution' => $sourceInstitutionValue,
             'source_hold_reference' => $sourceHoldReferenceValue
-        ])
+        ]),
+        'performed_by' => $requester,
+        'ip_address' => $ipAddress,
+        'user_agent' => $userAgent
     ]);
 
     $pdo->commit();
@@ -410,6 +450,8 @@ try {
         'atm_pin' => $voucherPin,
         'voucher_number' => $voucherNumber,
         'auth_code' => $authCode,
+        'qr_code' => $qrCode,
+        'barcode' => $barcode,
         'amount' => $amount,
         'currency' => $currency,
         'expiry' => $voucherExpiresAt,
