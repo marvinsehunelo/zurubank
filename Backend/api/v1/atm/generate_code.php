@@ -167,8 +167,9 @@ try {
         }
     }
 
-    // HARD CODE created_by = 2
+    // HARD CODE created_by = 2, redeemed_by = NULL
     $createdBy = 2;
+    $redeemedBy = null;  // NULL for unredeemed vouchers
     
     // Expiry (24 hours from now)
     $voucherExpiresAt = date('Y-m-d H:i:s', strtotime('+24 hours'));
@@ -183,7 +184,7 @@ try {
     $qrCode = "ZURUBANK:{$voucherNumber}:{$authCode}";
     $barcode = $voucherNumber;
 
-    // Insert into instant_money_vouchers
+    // Insert into instant_money_vouchers - EXACT column order matching your table
     $stmt = $pdo->prepare("
         INSERT INTO instant_money_vouchers (
             amount,
@@ -193,11 +194,14 @@ try {
             created_at,
             voucher_number,
             voucher_pin,
+            redeemed_by,
             voucher_created_at,
             voucher_expires_at,
             sat_purchased,
             sat_fee_paid_by,
             sat_expires_at,
+            redeemed_at,
+            swap_made_at,
             holding_account,
             status,
             origin,
@@ -216,11 +220,14 @@ try {
             NOW(),
             :voucher_number,
             :voucher_pin,
+            :redeemed_by,
             NOW(),
             :voucher_expires_at,
             :sat_purchased,
             :sat_fee_paid_by,
             :sat_expires_at,
+            NULL,
+            NULL,
             'VOUCHER-SUSPENSE',
             'active',
             :origin,
@@ -243,10 +250,11 @@ try {
     $stmt->execute([
         ':amount'                 => $amount,
         ':currency'               => $currency,
-        ':created_by'             => $createdBy,  // HARD CODED = 2
+        ':created_by'             => $createdBy,  // INTEGER 2
         ':recipient_phone'        => $normalizedPhone,
         ':voucher_number'         => $voucherNumber,
         ':voucher_pin'            => $voucherPin,
+        ':redeemed_by'            => $redeemedBy,  // NULL
         ':voucher_expires_at'     => $voucherExpiresAt,
         ':sat_purchased'          => $satPurchased,
         ':sat_fee_paid_by'        => $satFeePaidBy,
@@ -320,7 +328,7 @@ try {
         . "⏰ **Valid for 24 hours only**\n"
         . "🔒 Keep this information secure!";
 
-    // Insert into voucher_cashout_details (redeemed_by columns are NULL by default)
+    // Insert into voucher_cashout_details
     $stmtDetails = $pdo->prepare("
         INSERT INTO voucher_cashout_details (
             voucher_number,
