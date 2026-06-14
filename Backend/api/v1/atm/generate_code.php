@@ -2,7 +2,7 @@
 // --------------------------------------------------
 // generate_code.php
 // ZuruBank Instant Money Voucher Generator
-// SIMPLIFIED VERSION - Excludes created_by and redeemed_by
+// INCLUDES created_by = 2, EXCLUDES redeemed_by
 // --------------------------------------------------
 
 require_once __DIR__ . '/../../../config/db.php';
@@ -139,12 +139,12 @@ try {
     $qrCode = "ZURUBANK:{$voucherNumber}:{$authCode}";
     $barcode = $voucherNumber;
 
-    // SIMPLIFIED INSERT - Excluding created_by and redeemed_by
-    // Let database use default values for those columns
+    // INSERT with created_by = 2, excluding redeemed_by
     $stmt = $pdo->prepare("
         INSERT INTO instant_money_vouchers (
             amount,
             currency,
+            created_by,
             recipient_phone,
             voucher_number,
             voucher_pin,
@@ -161,6 +161,7 @@ try {
         VALUES (
             :amount,
             :currency,
+            2,
             :recipient_phone,
             :voucher_number,
             :voucher_pin,
