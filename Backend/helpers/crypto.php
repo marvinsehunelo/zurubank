@@ -68,6 +68,30 @@ function canonicalize_payload(array $payload): string
 }
 
 /**
+ * Clean and format private key properly
+ */
+function clean_private_key($rawKey)
+{
+    // Replace literal \n and \\n with actual newlines
+    $cleaned = str_replace(['\\n', '\n'], "\n", $rawKey);
+    
+    // Remove any extra whitespace at beginning/end
+    $cleaned = trim($cleaned);
+    
+    // Check if key already has PEM headers
+    if (strpos($cleaned, '-----BEGIN PRIVATE KEY-----') === false && 
+        strpos($cleaned, '-----BEGIN RSA PRIVATE KEY-----') === false) {
+        // No headers, assume it's just the base64 content
+        // Add proper PEM headers
+        $cleaned = "-----BEGIN PRIVATE KEY-----\n" . 
+                   chunk_split($cleaned, 64, "\n") . 
+                   "-----END PRIVATE KEY-----\n";
+    }
+    
+    return $cleaned;
+}
+
+/**
  * Sign payload for outgoing response
  * CRITICAL: Must match exactly what VOUCHMORPH expects to verify
  * Matches SACCUSSALIS implementation
@@ -77,22 +101,32 @@ function sign_payload($payload, $privateKey = null)
     if (!$privateKey) {
         $privateKeyContent = getenv('ZURUBANK_PRIVATE_KEY_CONTENT');
         if (!$privateKeyContent) {
-            error_log("ZURUBANK_PRIVATE_KEY_CONTENT not found");
+            error_log("ZURUBANK: ZURUBANK_PRIVATE_KEY_CONTENT not found");
             return null;
         }
-        $privateKeyContent = str_replace(['\\n', '\n'], "\n", $privateKeyContent);
         
-        if (strpos($privateKeyContent, '-----BEGIN PRIVATE KEY-----') === false) {
-            $privateKeyContent = "-----BEGIN PRIVATE KEY-----\n" . 
-                                 chunk_split(trim($privateKeyContent), 64, "\n") . 
-                                 "-----END PRIVATE KEY-----\n";
-        }
+        // Clean and format the private key properly
+        $privateKeyContent = clean_private_key($privateKeyContent);
         
+        error_log("ZURUBANK: Private key length after cleaning: " . strlen($privateKeyContent));
+        error_log("ZURUBANK: Private key starts with: " . substr($privateKeyContent, 0, 50));
+        
+        // Try multiple formats
         $privateKey = openssl_pkey_get_private($privateKeyContent);
+        
         if (!$privateKey) {
-            error_log("Failed to load private key: " . openssl_error_string());
-            return null;
+            // Try with RSA specific header
+            $rsaKeyContent = str_replace('-----BEGIN PRIVATE KEY-----', '-----BEGIN RSA PRIVATE KEY-----', $privateKeyContent);
+            $rsaKeyContent = str_replace('-----END PRIVATE KEY-----', '-----END RSA PRIVATE KEY-----', $rsaKeyContent);
+            $privateKey = openssl_pkey_get_private($rsaKeyContent);
+            
+            if (!$privateKey) {
+                $error = openssl_error_string();
+                error_log("ZURUBANK: Failed to load private key: " . $error);
+                return null;
+            }
         }
+        error_log("ZURUBANK: Private key loaded successfully");
     }
     
     // CRITICAL: VOUCHMORPH expects timestamp to be included in the signed payload
@@ -105,7 +139,7 @@ function sign_payload($payload, $privateKey = null)
     // CRITICAL: Must use EXACT same JSON encoding as VOUCHMORPH
     $payloadJson = json_encode($payloadWithTimestamp, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     
-    error_log("ZURUBANK: Signing payload: " . $payloadJson);
+    error_log("ZURUBANK: Signing payload length: " . strlen($payloadJson));
     
     $signature = '';
     $signResult = openssl_sign($payloadJson, $signature, $privateKey, OPENSSL_ALGO_SHA256);
@@ -130,11 +164,17 @@ function sign_payload($payload, $privateKey = null)
  */
 function send_signed_response($payload, $httpCode = 200)
 {
+    // Clear any existing output buffers
+    while (ob_get_level()) {
+        ob_end_clean();
+    }
+    
     // Sign the payload
     $signed = sign_payload($payload);
     
     if (!$signed) {
         error_log("ZURUBANK: Failed to sign response - sending unsigned");
+        header('Content-Type: application/json');
         http_response_code($httpCode);
         echo json_encode($payload);
         exit;
@@ -163,6 +203,7 @@ function send_signed_response($payload, $httpCode = 200)
     }
     error_log("ZURUBANK: Sending signed response: " . json_encode($logResponse));
     
+    header('Content-Type: application/json');
     http_response_code($httpCode);
     echo json_encode($response);
     exit;
@@ -215,6 +256,11 @@ function verify_requester_signature($input, $pdo)
         $decodedSig = base64_decode($signature);
         
         $keyResource = openssl_pkey_get_public($publicKey);
+        if (!$keyResource) {
+            error_log("ZURUBANK: Invalid public key resource");
+            return ['valid' => false, 'message' => 'Invalid public key'];
+        }
+        
         $result = openssl_verify($jsonToVerify, $decodedSig, $keyResource, OPENSSL_ALGO_SHA256);
         $isValid = ($result === 1);
         
