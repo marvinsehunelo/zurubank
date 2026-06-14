@@ -3,12 +3,10 @@
 
 /**
  * Certificate Manager - Visa/Mastercard style PKI
- * 
- * Members present their certificate with each request.
+ * * Members present their certificate with each request.
  * Receivers verify against the trusted CA root.
  * NO manual key exchange needed for new members!
- * 
- * BENCHMARKED AGAINST SACCUSSALIS WORKING VERSION
+ * * BENCHMARKED AGAINST SACCUSSALIS WORKING VERSION
  */
 class CertificateManager
 {
@@ -30,11 +28,31 @@ class CertificateManager
             error_log("CertificateManager: WARNING - No CA certificate found for {$this->myName}");
         }
         
-        // Load this member's private key - SIMPLE, just like SACCUSSALIS
+        // Load this member's private key
         $privateKeyContent = getenv($this->myName . '_PRIVATE_KEY_CONTENT');
         if ($privateKeyContent) {
-            // Just replace newlines - NO complex normalization!
-            $this->myPrivateKey = str_replace(['\\n', '\n'], "\n", $privateKeyContent);
+            // Replace literal markers with real newlines
+            $privateKeyContent = str_replace(['\\n', '\n'], "\n", $privateKeyContent);
+            $privateKeyContent = trim($privateKeyContent);
+            
+            // CRITICAL: Format raw base64 or broken PEM into an OpenSSL-compliant key block
+            if (strpos($privateKeyContent, '-----BEGIN') === false) {
+                error_log("CertificateManager: Raw key detected. Applying standard headers.");
+                $privateKeyContent = "-----BEGIN PRIVATE KEY-----\n" . 
+                                     chunk_split($privateKeyContent, 64, "\n") . 
+                                     "-----END PRIVATE KEY-----\n";
+            } else {
+                // Ensure existing PEM structural chunks have clean 64-character line breaks
+                preg_match('/-----BEGIN (.*?)-----\s+(.*?)\s+-----END \\1-----/s', $privateKeyContent, $matches);
+                if (isset($matches)) {
+                    $body = preg_replace('/\s+/', '', $matches);
+                    $privateKeyContent = "-----BEGIN {$matches}-----\n" . 
+                                         chunk_split($body, 64, "\n") . 
+                                         "-----END {$matches}-----\n";
+                }
+            }
+            
+            $this->myPrivateKey = $privateKeyContent;
             error_log("CertificateManager: Private key loaded for {$this->myName}");
         } else {
             error_log("CertificateManager: WARNING - No private key found for {$this->myName}");
@@ -109,7 +127,7 @@ class CertificateManager
         exec($expiryCmd, $expiryOutput);
         foreach ($expiryOutput as $line) {
             if (preg_match('/notAfter=(.*)/', $line, $matches)) {
-                $expiryDate = strtotime($matches[1]);
+                $expiryDate = strtotime($matches);
                 if ($expiryDate < time()) {
                     error_log("CertificateManager: Certificate has expired");
                     $result = false;
