@@ -51,24 +51,56 @@ function canonicalize_payload(array $payload): string
 function sign_payload($payload, $privateKey = null)
 {
     if (!$privateKey) {
-        // Use ZURUBANK_PRIVATE_KEY_CONTENT (like SACCUSSALIS uses SACCUSSALIS_PRIVATE_KEY_CONTENT)
         $privateKeyContent = getenv('ZURUBANK_PRIVATE_KEY_CONTENT');
         if (!$privateKeyContent) {
             error_log("ZURUBANK_PRIVATE_KEY_CONTENT not found");
             return null;
         }
-        $privateKeyContent = str_replace(['\\n', '\n'], "\n", $privateKeyContent);
         
-        if (strpos($privateKeyContent, '-----BEGIN PRIVATE KEY-----') === false) {
-            $privateKeyContent = "-----BEGIN PRIVATE KEY-----\n" . 
-                                 chunk_split(trim($privateKeyContent), 64, "\n") . 
-                                 "-----END PRIVATE KEY-----\n";
+        // First, log what we have for debugging
+        error_log("ZURUBANK: Raw key length: " . strlen($privateKeyContent));
+        error_log("ZURUBANK: Raw key first 50 chars: " . substr($privateKeyContent, 0, 50));
+        
+        // Replace literal \n and \r with actual newlines
+        $privateKeyContent = str_replace(['\\n', '\\r', '\r'], "\n", $privateKeyContent);
+        
+        // Also handle case where newlines are completely missing (single line)
+        if (strpos($privateKeyContent, "\n") === false && strpos($privateKeyContent, '-----BEGIN PRIVATE KEY-----') !== false) {
+            // It's a single line PEM - add proper line breaks
+            $privateKeyContent = str_replace('-----BEGIN PRIVATE KEY-----', "-----BEGIN PRIVATE KEY-----\n", $privateKeyContent);
+            $privateKeyContent = str_replace('-----END PRIVATE KEY-----', "\n-----END PRIVATE KEY-----\n", $privateKeyContent);
+            // Add 64-char line breaks to the body
+            preg_match('/-----BEGIN PRIVATE KEY-----\n(.*?)\n-----END PRIVATE KEY-----/s', $privateKeyContent, $matches);
+            if (isset($matches[1])) {
+                $body = preg_replace('/\s/', '', $matches[1]);
+                $chunked = chunk_split($body, 64, "\n");
+                $privateKeyContent = "-----BEGIN PRIVATE KEY-----\n" . trim($chunked) . "\n-----END PRIVATE KEY-----\n";
+            }
         }
+        
+        // Ensure we have Unix line endings
+        $privateKeyContent = str_replace("\r", "", $privateKeyContent);
+        
+        error_log("ZURUBANK: Processed key first 50 chars: " . substr($privateKeyContent, 0, 50));
+        error_log("ZURUBANK: Processed key has newlines? " . (strpos($privateKeyContent, "\n") !== false ? "YES" : "NO"));
         
         $privateKey = openssl_pkey_get_private($privateKeyContent);
         if (!$privateKey) {
-            error_log("Failed to load private key");
-            return null;
+            $error = openssl_error_string();
+            error_log("ZURUBANK: Failed to load private key: " . $error);
+            
+            // Try PKCS#1 format as fallback
+            $pkcs1Key = str_replace('-----BEGIN PRIVATE KEY-----', '-----BEGIN RSA PRIVATE KEY-----', $privateKeyContent);
+            $pkcs1Key = str_replace('-----END PRIVATE KEY-----', '-----END RSA PRIVATE KEY-----', $pkcs1Key);
+            $privateKey = openssl_pkey_get_private($pkcs1Key);
+            
+            if (!$privateKey) {
+                error_log("ZURUBANK: Also failed with PKCS#1 format");
+                return null;
+            }
+            error_log("ZURUBANK: Successfully loaded as PKCS#1 format");
+        } else {
+            error_log("ZURUBANK: Successfully loaded private key");
         }
     }
     
@@ -82,7 +114,7 @@ function sign_payload($payload, $privateKey = null)
     // CRITICAL: Must use EXACT same JSON encoding as VOUCHMORPH
     $payloadJson = json_encode($payloadWithTimestamp, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     
-    error_log("ZURUBANK: Signing payload: " . $payloadJson);
+    error_log("ZURUBANK: Signing payload length: " . strlen($payloadJson));
     
     $signature = '';
     $signResult = openssl_sign($payloadJson, $signature, $privateKey, OPENSSL_ALGO_SHA256);
