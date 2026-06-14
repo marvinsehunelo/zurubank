@@ -4,60 +4,85 @@
 require_once __DIR__ . '/CertificateManager.php';
 
 /**
+ * Get requester public key (now extracts from certificate)
+ */
+function get_requester_public_key($requester, $pdo)
+{
+    $input = json_decode(file_get_contents('php://input'), true);
+    
+    if (isset($input['certificate'])) {
+        $certManager = new CertificateManager();
+        $publicKey = $certManager->extractPublicKeyFromCert($input['certificate']);
+        if ($publicKey) {
+            error_log("Extracted public key from certificate for {$requester}");
+            return $publicKey;
+        }
+    }
+    
+    // Legacy fallback
+    $envKeyName = strtoupper($requester) . '_PUBLIC_KEY';
+    $envKey = getenv($envKeyName);
+    if ($envKey) {
+        return str_replace(['\\n', '\n'], "\n", $envKey);
+    }
+    
+    return null;
+}
+
+/**
+ * JSON canonicalization - used for VERIFYING signatures
+ * This matches what VOUCHMORPH uses to verify
+ */
+function canonicalize_payload(array $payload): string
+{
+    // For VERIFYING incoming requests - remove signature fields
+    unset($payload['signature']);
+    unset($payload['certificate']);
+    // Keep requester for verification
+    ksort($payload);
+    return json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+}
+
+/**
  * Sign payload for outgoing response
+ * CRITICAL: Must match exactly what VOUCHMORPH expects to verify
+ * FOLLOWS SACCUSSALIS PATTERN EXACTLY
  */
 function sign_payload($payload, $privateKey = null)
 {
     if (!$privateKey) {
-        $certManager = new CertificateManager();
-        $privateKeyString = $certManager->myPrivateKey;
-        
-        if (!$privateKeyString) {
-            error_log("ZURUBANK: No private key available for signing");
+        // Use ZURUBANK_PRIVATE_KEY_CONTENT (like SACCUSSALIS uses SACCUSSALIS_PRIVATE_KEY_CONTENT)
+        $privateKeyContent = getenv('ZURUBANK_PRIVATE_KEY_CONTENT');
+        if (!$privateKeyContent) {
+            error_log("ZURUBANK_PRIVATE_KEY_CONTENT not found");
             return null;
         }
+        $privateKeyContent = str_replace(['\\n', '\n'], "\n", $privateKeyContent);
         
-        // Clean the private key - ensure proper format
-        $privateKeyString = trim($privateKeyString);
-        $privateKeyString = str_replace(['\\n', '\n', '\r'], "\n", $privateKeyString);
-        
-        // Ensure it has proper PEM headers
-        if (strpos($privateKeyString, '-----BEGIN PRIVATE KEY-----') === false && 
-            strpos($privateKeyString, '-----BEGIN RSA PRIVATE KEY-----') === false) {
-            // If no headers, assume it's raw base64 and add PKCS#8 headers
-            $privateKeyString = "-----BEGIN PRIVATE KEY-----\n" . 
-                                chunk_split($privateKeyString, 64, "\n") . 
-                                "-----END PRIVATE KEY-----\n";
-            error_log("ZURUBANK: Added PEM headers to private key");
+        if (strpos($privateKeyContent, '-----BEGIN PRIVATE KEY-----') === false) {
+            $privateKeyContent = "-----BEGIN PRIVATE KEY-----\n" . 
+                                 chunk_split(trim($privateKeyContent), 64, "\n") . 
+                                 "-----END PRIVATE KEY-----\n";
         }
         
-        // Ensure proper line endings (Unix style)
-        $privateKeyString = str_replace("\r", "", $privateKeyString);
-        
-        // Load the private key
-        $privateKey = openssl_pkey_get_private($privateKeyString);
-        
+        $privateKey = openssl_pkey_get_private($privateKeyContent);
         if (!$privateKey) {
-            // Try PKCS#1 format
-            $pkcs1Key = str_replace('-----BEGIN PRIVATE KEY-----', '-----BEGIN RSA PRIVATE KEY-----', $privateKeyString);
-            $pkcs1Key = str_replace('-----END PRIVATE KEY-----', '-----END RSA PRIVATE KEY-----', $pkcs1Key);
-            $privateKey = openssl_pkey_get_private($pkcs1Key);
-            
-            if (!$privateKey) {
-                error_log("ZURUBANK: Failed to load private key: " . openssl_error_string());
-                return null;
-            }
+            error_log("Failed to load private key");
+            return null;
         }
-        error_log("ZURUBANK: Private key loaded successfully as resource");
     }
     
+    // CRITICAL: VOUCHMORPH expects timestamp to be included in the signed payload
     $timestamp = time();
     $payloadWithTimestamp = array_merge($payload, ['timestamp' => $timestamp]);
+    
+    // CRITICAL: VOUCHMORPH uses ksort before verification
     ksort($payloadWithTimestamp);
     
+    // CRITICAL: Must use EXACT same JSON encoding as VOUCHMORPH
     $payloadJson = json_encode($payloadWithTimestamp, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     
-    error_log("ZURUBANK: Signing payload length: " . strlen($payloadJson));
+    error_log("ZURUBANK: Signing payload: " . $payloadJson);
     
     $signature = '';
     $signResult = openssl_sign($payloadJson, $signature, $privateKey, OPENSSL_ALGO_SHA256);
@@ -78,43 +103,27 @@ function sign_payload($payload, $privateKey = null)
 
 /**
  * Send signed response with certificate
+ * This is what generate_code.php calls
  */
 function send_signed_response($payload, $httpCode = 200)
 {
-    // Clear any existing output buffers
-    while (ob_get_level()) {
-        ob_end_clean();
-    }
-    
-    $certManager = new CertificateManager();
-    
     // Sign the payload
     $signed = sign_payload($payload);
     
     if (!$signed) {
-        error_log("ZURUBANK: Failed to sign response - sending error");
-        header('Content-Type: application/json');
-        http_response_code(500);
-        echo json_encode([
-            'status' => 'ERROR',
-            'token_generated' => false,
-            'error' => 'Failed to sign response'
-        ]);
+        error_log("ZURUBANK: Failed to sign response - sending unsigned");
+        http_response_code($httpCode);
+        echo json_encode($payload);
         exit;
     }
     
     // Get certificate
-    $certContent = $certManager->myCertificate;
-    if (!$certContent) {
-        error_log("ZURUBANK: No certificate available");
-        header('Content-Type: application/json');
-        http_response_code(500);
-        echo json_encode([
-            'status' => 'ERROR',
-            'token_generated' => false,
-            'error' => 'No certificate available'
-        ]);
-        exit;
+    $certContent = getenv('ZURUBANK_CERT_CONTENT');
+    if ($certContent) {
+        $certContent = str_replace(['\\n', '\n'], "\n", $certContent);
+        error_log("ZURUBANK: Certificate loaded, length: " . strlen($certContent));
+    } else {
+        error_log("ZURUBANK: WARNING - No certificate content found in environment");
     }
     
     // Build response exactly as VOUCHMORPH expects
@@ -124,12 +133,63 @@ function send_signed_response($payload, $httpCode = 200)
         'certificate' => $certContent
     ]);
     
-    error_log("ZURUBANK: Sending signed response");
+    // Log the response structure (without full cert for brevity)
+    $logResponse = $response;
+    if (isset($logResponse['certificate'])) {
+        $logResponse['certificate'] = '[CERTIFICATE LENGTH: ' . strlen($logResponse['certificate']) . ']';
+    }
+    error_log("ZURUBANK: Sending signed response: " . json_encode($logResponse));
     
-    header('Content-Type: application/json');
     http_response_code($httpCode);
     echo json_encode($response);
     exit;
+}
+
+/**
+ * Verify a signed response (for ZURUBANK to verify VOUCHMORPH responses)
+ */
+function verify_signed_response($response, $expectedRequester = 'VOUCHMORPH')
+{
+    $certificate = $response['certificate'] ?? null;
+    $signature = $response['signature'] ?? null;
+    $requester = $response['requester'] ?? 'UNKNOWN';
+    
+    if (!$certificate || !$signature) {
+        error_log("ZURUBANK: Missing certificate or signature in response");
+        return false;
+    }
+    
+    $certManager = new CertificateManager();
+    
+    // Verify certificate
+    if (!$certManager->verifyCertificate($certificate)) {
+        error_log("ZURUBANK: Certificate verification failed for {$requester}");
+        return false;
+    }
+    
+    // Extract public key
+    $publicKey = $certManager->extractPublicKeyFromCert($certificate);
+    if (!$publicKey) {
+        error_log("ZURUBANK: Cannot extract public key");
+        return false;
+    }
+    
+    // Build payload for verification - keep requester and timestamp
+    $payloadToVerify = $response;
+    unset($payloadToVerify['signature']);
+    unset($payloadToVerify['certificate']);
+    ksort($payloadToVerify);
+    
+    $jsonToVerify = json_encode($payloadToVerify, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    $decodedSig = base64_decode($signature);
+    
+    $keyResource = openssl_pkey_get_public($publicKey);
+    $result = openssl_verify($jsonToVerify, $decodedSig, $keyResource, OPENSSL_ALGO_SHA256);
+    $isValid = ($result === 1);
+    
+    error_log("ZURUBANK: Response from {$requester} - Signature: " . ($isValid ? "VALID" : "INVALID"));
+    
+    return $isValid;
 }
 
 /**
@@ -209,7 +269,6 @@ function authenticate_request($pdo, $requiredRole = null)
     
     if (!$verification['valid']) {
         send_signed_response([
-            'status' => 'ERROR',
             'success' => false,
             'error' => $verification['message'],
             'verified' => false
