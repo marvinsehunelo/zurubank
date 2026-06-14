@@ -15,9 +15,9 @@ class CertificateManager
     private ?string $myCertificate = null;
     private ?string $myName = null;
     
-    public function __construct(?string $vouchmorphpartnerName = null)
+    public function __construct(?string $memberName = null)
     {
-        $this->myName = $vouchmorphpartnerName ?? getenv('VOUCHMORPH_PARTNER_NAME') ?: 'ZURUBANK';
+        $this->myName = $memberName ?? getenv('MEMBER_NAME') ?: 'ZURUBANK';
         
         // Load CA certificate (trust anchor)
         $caContent = getenv('VOUCHMORPH_CA_CERT_CONTENT');
@@ -30,12 +30,15 @@ class CertificateManager
         
         // Load this member's private key
         $privateKeyContent = getenv($this->myName . '_PRIVATE_KEY_CONTENT');
+        if (!$privateKeyContent) {
+            $privateKeyContent = getenv($this->myName . '_PRIVATE_KEY');
+        }
+        
         if ($privateKeyContent) {
             $normalizedKey = $this->normalizePemContent($privateKeyContent);
-            // Pre-load private key as resource
             $this->myPrivateKey = $this->loadPrivateKey($normalizedKey);
             if ($this->myPrivateKey) {
-                error_log("CertificateManager: Private key loaded for {$this->myName}");
+                error_log("CertificateManager: Private key loaded successfully for {$this->myName}");
             } else {
                 error_log("CertificateManager: ERROR - Failed to load private key for {$this->myName}");
             }
@@ -45,6 +48,10 @@ class CertificateManager
         
         // Load this member's certificate
         $certContent = getenv($this->myName . '_CERT_CONTENT');
+        if (!$certContent) {
+            $certContent = getenv($this->myName . '_CERT');
+        }
+        
         if ($certContent) {
             $this->myCertificate = $this->normalizePemContent($certContent);
             error_log("CertificateManager: Certificate loaded for {$this->myName}");
@@ -96,39 +103,39 @@ class CertificateManager
      */
     private function loadPrivateKey(string $keyContent)
     {
-        // Attempt 1: Direct load
+        // Log first few chars for debugging
+        error_log("CertificateManager: Private key starts with: " . substr($keyContent, 0, 50));
+        error_log("CertificateManager: Private key length: " . strlen($keyContent));
+        
+        // Attempt 1: Direct load as is
         $key = openssl_pkey_get_private($keyContent);
         if ($key) {
+            error_log("CertificateManager: Private key loaded (direct)");
             return $key;
         }
+        error_log("CertificateManager: Direct load failed: " . openssl_error_string());
         
         // Attempt 2: Try with explicit null passphrase
         $key = openssl_pkey_get_private($keyContent, null);
         if ($key) {
+            error_log("CertificateManager: Private key loaded (null passphrase)");
             return $key;
         }
         
-        // Attempt 3: Extract from PEM if it's wrapped in a certificate
-        if (strpos($keyContent, 'BEGIN CERTIFICATE') !== false) {
-            $tempCert = tempnam(sys_get_temp_dir(), 'cert_');
-            file_put_contents($tempCert, $keyContent);
-            $cmd = "openssl x509 -in " . escapeshellarg($tempCert) . " -pubkey -noout 2>&1";
-            $pubKey = shell_exec($cmd);
-            unlink($tempCert);
-            if ($pubKey) {
-                $key = openssl_pkey_get_public($pubKey);
-                if ($key) {
-                    error_log("CertificateManager: Extracted public key from certificate");
-                    return $key;
-                }
-            }
+        // Attempt 3: Try as RSA private key (convert PKCS#8 to PKCS#1)
+        $rsaKey = str_replace('-----BEGIN PRIVATE KEY-----', '-----BEGIN RSA PRIVATE KEY-----', $keyContent);
+        $rsaKey = str_replace('-----END PRIVATE KEY-----', '-----END RSA PRIVATE KEY-----', $rsaKey);
+        $key = openssl_pkey_get_private($rsaKey);
+        if ($key) {
+            error_log("CertificateManager: Private key loaded (RSA format)");
+            return $key;
         }
         
-        // Attempt 4: Try PKCS#8 conversion
+        // Attempt 4: Try with OpenSSL command line conversion
         $tempKey = tempnam(sys_get_temp_dir(), 'key_');
         file_put_contents($tempKey, $keyContent);
         
-        // Try to convert to PKCS#1 if it's PKCS#8
+        // Try to convert to PKCS#1
         $cmd = "openssl rsa -in " . escapeshellarg($tempKey) . " -out " . escapeshellarg($tempKey . '.pem') . " 2>&1";
         exec($cmd, $output, $returnCode);
         
@@ -136,22 +143,29 @@ class CertificateManager
             $convertedKey = file_get_contents($tempKey . '.pem');
             $key = openssl_pkey_get_private($convertedKey);
             if ($key) {
-                error_log("CertificateManager: Converted PKCS#8 to PKCS#1 successfully");
+                error_log("CertificateManager: Private key loaded (converted via openssl)");
                 unlink($tempKey);
                 unlink($tempKey . '.pem');
                 return $key;
             }
         }
         
-        // Attempt 5: Increase memory limit and try again
-        ini_set('memory_limit', '1G');
-        $key = openssl_pkey_get_private($keyContent);
-        if ($key) {
-            error_log("CertificateManager: Loaded private key with increased memory");
-            return $key;
+        // Attempt 5: Try to extract from PKCS#12 if it's in that format
+        $cmd = "openssl pkcs12 -in " . escapeshellarg($tempKey) . " -nocerts -nodes -passin pass: 2>&1";
+        exec($cmd, $output, $returnCode);
+        if ($returnCode === 0 && !empty($output)) {
+            $extractedKey = implode("\n", $output);
+            $key = openssl_pkey_get_private($extractedKey);
+            if ($key) {
+                error_log("CertificateManager: Private key loaded (extracted from PKCS#12)");
+                unlink($tempKey);
+                return $key;
+            }
         }
         
-        // Log the error for debugging
+        unlink($tempKey);
+        
+        // Log the final error
         $errorMsg = openssl_error_string();
         error_log("CertificateManager: All private key loading attempts failed. Last error: " . ($errorMsg ?: 'Unknown'));
         
@@ -305,11 +319,15 @@ class CertificateManager
             return ['verified' => false, 'message' => 'Cannot extract public key', 'requester' => $requester];
         }
         
-        // Step 3: Prepare payload for verification
-        $payloadToVerify = $request;
-        unset($payloadToVerify['signature']);
-        unset($payloadToVerify['certificate']);
-        unset($payloadToVerify['requester']);
+        // Step 3: Prepare payload for verification (remove signature and certificate, keep timestamp and requester)
+        $payloadToVerify = [];
+        foreach ($request as $key => $value) {
+            if (!in_array($key, ['signature', 'certificate'])) {
+                $payloadToVerify[$key] = $value;
+            }
+        }
+        
+        // CRITICAL: Sort keys alphabetically (same as VOUCHMORPH)
         ksort($payloadToVerify);
         
         $jsonToVerify = json_encode($payloadToVerify, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
@@ -346,12 +364,14 @@ class CertificateManager
     {
         if (!$this->myPrivateKey || !$this->myCertificate) {
             error_log("CertificateManager: Cannot sign request - missing private key or certificate for {$this->myName}");
+            error_log("CertificateManager: myPrivateKey: " . ($this->myPrivateKey ? "YES" : "NO"));
+            error_log("CertificateManager: myCertificate: " . ($this->myCertificate ? "YES" : "NO"));
             return $payload;
         }
         
         // CRITICAL: Must match what VOUCHMORPH expects for verification
         $timestamp = time();
-        $payloadWithTimestamp = array_merge($payload, ['timestamp' => $timestamp]);
+        $payloadWithTimestamp = array_merge($payload, ['timestamp' => $timestamp, 'requester' => $requester]);
         ksort($payloadWithTimestamp);
         
         $jsonToSign = json_encode($payloadWithTimestamp, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
@@ -371,18 +391,7 @@ class CertificateManager
         
         return array_merge($payloadWithTimestamp, [
             'signature' => $encodedSignature,
-            'requester' => $requester,
             'certificate' => $this->myCertificate
         ]);
-    }
-}
-
-// Helper function for sending signed responses (add this at the end of the file if not exists elsewhere)
-if (!function_exists('send_signed_response')) {
-    function send_signed_response($data) {
-        $certManager = new CertificateManager('ZURUBANK');
-        $signedData = $certManager->createSignedRequest($data, 'ZURUBANK');
-        echo json_encode($signedData);
-        exit;
     }
 }
