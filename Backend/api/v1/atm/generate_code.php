@@ -76,12 +76,16 @@ try {
     // Extract payload fields (matching SwapService expectations)
     $beneficiaryPhone = trim($input['beneficiary_phone'] ?? $input['phone'] ?? '');
     $amount = floatval($input['amount'] ?? 0);
+    $currency = trim($input['currency'] ?? 'BWP');
     $reference = trim($input['reference'] ?? '');
+    $origin = trim($input['origin'] ?? $input['source_institution'] ?? 'SACCUSSALIS');
     $sourceInstitution = trim($input['source_institution'] ?? $input['from_institution'] ?? 'SACCUSSALIS');
     $sourceHoldReference = trim($input['source_hold_reference'] ?? $input['hold_reference'] ?? '');
     $sourceAssetType = trim($input['source_asset_type'] ?? $input['asset_type'] ?? '');
     $codeHash = trim($input['code_hash'] ?? '');
     $idempotencyKey = $input['idempotency_key'] ?? $input['idempotencyKey'] ?? null;
+    $satPurchased = $input['sat_purchased'] ?? null;
+    $satFeePaidBy = $input['sat_fee_paid_by'] ?? null;
     
     // Also check for note_breakdown (ATM denomination info)
     $noteBreakdown = $input['note_breakdown'] ?? [];
@@ -98,12 +102,11 @@ try {
     if ($idempotencyKey) {
         $checkStmt = $pdo->prepare("
             SELECT voucher_id FROM instant_money_vouchers 
-            WHERE reference = :reference OR code_hash = :code_hash OR external_reference = :idempotency_key
+            WHERE reference = :reference OR external_reference = :idempotency_key
             LIMIT 1
         ");
         $checkStmt->execute([
             'reference' => $reference,
-            'code_hash' => $codeHash,
             'idempotency_key' => $idempotencyKey
         ]);
         
@@ -126,32 +129,102 @@ try {
         }
     }
 
-    // Create tables if not exists (with enhanced columns - NO updated_at)
-    $pdo->exec("
-        CREATE TABLE IF NOT EXISTS instant_money_vouchers (
-            voucher_id SERIAL PRIMARY KEY,
-            amount NUMERIC(20,4) NOT NULL,
-            created_by INTEGER,
-            recipient_phone VARCHAR(50),
-            voucher_number VARCHAR(255) UNIQUE NOT NULL,
-            voucher_pin VARCHAR(10) NOT NULL,
-            voucher_expires_at TIMESTAMP NOT NULL,
-            status VARCHAR(20) DEFAULT 'active',
-            holding_account VARCHAR(50),
-            created_at TIMESTAMP DEFAULT NOW(),
-            reference VARCHAR(255),
-            external_reference VARCHAR(255),
-            source_institution VARCHAR(100),
-            source_hold_reference VARCHAR(255),
-            source_asset_type VARCHAR(50),
-            code_hash VARCHAR(255),
-            created_by_requester VARCHAR(100),
-            signature_verified BOOLEAN DEFAULT FALSE,
-            verification_method VARCHAR(50),
-            note_breakdown JSONB
+    // Verify table exists with correct structure (but don't recreate)
+    try {
+        $pdo->query("SELECT 1 FROM instant_money_vouchers LIMIT 1");
+    } catch (PDOException $e) {
+        error_log("ZURUBANK: instant_money_vouchers table missing - please run migration");
+        throw new Exception("Database table not properly initialized");
+    }
+
+    // Expiry (24 hours from now)
+    $voucherExpiresAt = date('Y-m-d H:i:s', strtotime('+24 hours'));
+    $satExpiresAt = $satPurchased ? date('Y-m-d H:i:s', strtotime('+72 hours')) : null;
+
+    // Generate voucher number and PIN
+    $voucherNumber = str_pad(random_int(0, 999999999999), 12, '0', STR_PAD_LEFT);
+    $voucherPin    = str_pad(random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+    
+    // Generate auth code for cashout details
+    $authCode = str_pad(random_int(0, 99999999), 8, '0', STR_PAD_LEFT);
+
+    // Insert into instant_money_vouchers (using ACTUAL column names)
+    $stmt = $pdo->prepare("
+        INSERT INTO instant_money_vouchers (
+            amount,
+            currency,
+            created_by,
+            recipient_phone,
+            created_at,
+            voucher_number,
+            voucher_pin,
+            voucher_created_at,
+            voucher_expires_at,
+            sat_purchased,
+            sat_fee_paid_by,
+            sat_expires_at,
+            holding_account,
+            status,
+            origin,
+            external_reference,
+            source_institution,
+            source_hold_reference,
+            reference,
+            source_asset_type,
+            code_hash
         )
+        VALUES (
+            :amount,
+            :currency,
+            1,
+            :recipient_phone,
+            NOW(),
+            :voucher_number,
+            :voucher_pin,
+            NOW(),
+            :voucher_expires_at,
+            :sat_purchased,
+            :sat_fee_paid_by,
+            :sat_expires_at,
+            'VOUCHER-SUSPENSE',
+            'active',
+            :origin,
+            :external_reference,
+            :source_institution,
+            :source_hold_reference,
+            :reference,
+            :source_asset_type,
+            :code_hash
+        )
+        RETURNING voucher_id
     ");
 
+    $stmt->execute([
+        ':amount'                 => $amount,
+        ':currency'               => $currency,
+        ':recipient_phone'        => $normalizedPhone,
+        ':voucher_number'         => $voucherNumber,
+        ':voucher_pin'            => $voucherPin,
+        ':voucher_expires_at'     => $voucherExpiresAt,
+        ':sat_purchased'          => $satPurchased,
+        ':sat_fee_paid_by'        => $satFeePaidBy,
+        ':sat_expires_at'         => $satExpiresAt,
+        ':origin'                 => $origin,
+        ':external_reference'     => $idempotencyKey ?: $reference,
+        ':source_institution'     => $sourceInstitution,
+        ':source_hold_reference'  => $sourceHoldReference,
+        ':reference'              => $reference,
+        ':source_asset_type'      => $sourceAssetType,
+        ':code_hash'              => $codeHash ?: $idempotencyKey
+    ]);
+
+    $voucherId = $stmt->fetchColumn();
+
+    if (!$voucherId) {
+        throw new Exception("Failed to create swap voucher");
+    }
+
+    // Create voucher_cashout_details table if not exists
     $pdo->exec("
         CREATE TABLE IF NOT EXISTS voucher_cashout_details (
             id SERIAL PRIMARY KEY,
@@ -171,100 +244,19 @@ try {
         )
     ");
 
-    // Expiry (24 hours from now)
-    $expiresAt = date('Y-m-d H:i:s', strtotime('+24 hours'));
-
-    // Generate voucher number and PIN
-    $voucherNumber = str_pad(random_int(0, 999999999999), 12, '0', STR_PAD_LEFT);
-    $voucherPin    = str_pad(random_int(0, 999999), 6, '0', STR_PAD_LEFT);
-    
-    // Generate auth code
-    $authCode = str_pad(random_int(0, 99999999), 8, '0', STR_PAD_LEFT);
-
-    // Insert into instant_money_vouchers (NO updated_at)
-    $stmt = $pdo->prepare("
-        INSERT INTO instant_money_vouchers (
-            amount,
-            created_by,
-            recipient_phone,
-            voucher_number,
-            voucher_pin,
-            voucher_expires_at,
-            status,
-            holding_account,
-            created_at,
-            reference,
-            external_reference,
-            source_institution,
-            source_hold_reference,
-            source_asset_type,
-            code_hash,
-            created_by_requester,
-            signature_verified,
-            verification_method,
-            note_breakdown
-        )
-        VALUES (
-            :amount,
-            1,
-            :recipient_phone,
-            :voucher_number,
-            :voucher_pin,
-            :expires_at,
-            'active',
-            'VOUCHER-SUSPENSE',
-            NOW(),
-            :reference,
-            :external_reference,
-            :source_institution,
-            :source_hold_reference,
-            :source_asset_type,
-            :code_hash,
-            :requester,
-            :signature_verified,
-            :verification_method,
-            :note_breakdown::jsonb
-        )
-        RETURNING voucher_id
-    ");
-
-    $stmt->execute([
-        ':amount'                 => $amount,
-        ':recipient_phone'        => $normalizedPhone,
-        ':voucher_number'         => $voucherNumber,
-        ':voucher_pin'            => $voucherPin,
-        ':expires_at'             => $expiresAt,
-        ':reference'              => $reference,
-        ':external_reference'     => $idempotencyKey ?: $reference,
-        ':source_institution'     => $sourceInstitution,
-        ':source_hold_reference'  => $sourceHoldReference,
-        ':source_asset_type'      => $sourceAssetType,
-        ':code_hash'              => $idempotencyKey ?: $codeHash,
-        ':requester'              => $requester,
-        ':signature_verified'     => $isValid ? 1 : 0,
-        ':verification_method'    => 'certificate',
-        ':note_breakdown'         => json_encode($noteBreakdown)
-    ]);
-
-    $voucherId = $stmt->fetchColumn();
-
-    if (!$voucherId) {
-        throw new Exception("Failed to create swap voucher");
-    }
-
     // Generate universal instructions
     $instructions = "🔐 **ZuruBank Cashout Voucher**\n\n"
-        . "**Amount:** BWP {$amount}\n"
+        . "**Amount:** {$currency} {$amount}\n"
         . "**Voucher:** {$voucherNumber}\n"
         . "**PIN:** {$voucherPin}\n"
-        . "**Expires:** " . date('d M Y H:i', strtotime($expiresAt)) . "\n\n"
+        . "**Expires:** " . date('d M Y H:i', strtotime($voucherExpiresAt)) . "\n\n"
         . "**How to cash out:**\n\n"
         . "🏧 **ATMs:**\n"
         . "1. Go to ANY ZuruBank ATM\n"
         . "2. Select 'Cardless Cashout'\n"
         . "3. Enter voucher number: {$voucherNumber}\n"
         . "4. Enter PIN: {$voucherPin}\n"
-        . "5. Enter amount: BWP {$amount}\n"
+        . "5. Enter amount: {$currency} {$amount}\n"
         . "6. Collect your cash\n\n"
         . "👤 **Agents:**\n"
         . "1. Visit ANY ZuruBank Agent\n"
@@ -296,7 +288,7 @@ try {
             :voucher_number,
             :auth_code,
             :amount,
-            'BWP',
+            :currency,
             :recipient_phone,
             :instructions,
             :expires_at,
@@ -314,9 +306,10 @@ try {
         ':voucher_number'  => $voucherNumber,
         ':auth_code'       => $authCode,
         ':amount'          => $amount,
+        ':currency'        => $currency,
         ':recipient_phone' => $normalizedPhone,
         ':instructions'    => $instructions,
-        ':expires_at'      => $expiresAt,
+        ':expires_at'      => $voucherExpiresAt,
         ':reference'       => $reference,
         ':source_institution' => $sourceInstitution,
         ':requester'       => $requester,
@@ -360,9 +353,13 @@ try {
         'metadata' => json_encode([
             'signature_verified' => $isValid,
             'amount' => $amount,
+            'currency' => $currency,
             'reference' => $reference,
             'beneficiary' => $beneficiaryPhone,
-            'voucher_number' => $voucherNumber
+            'voucher_number' => $voucherNumber,
+            'origin' => $origin,
+            'source_institution' => $sourceInstitution,
+            'source_hold_reference' => $sourceHoldReference
         ])
     ]);
 
@@ -380,9 +377,9 @@ try {
         'voucher_number' => $voucherNumber,
         'auth_code' => $authCode,
         'amount' => $amount,
-        'currency' => 'BWP',
-        'expiry' => $expiresAt,
-        'expires_at' => $expiresAt,
+        'currency' => $currency,
+        'expiry' => $voucherExpiresAt,
+        'expires_at' => $voucherExpiresAt,
         'reference' => $reference,
         'requester' => $requester,
         'signature_verified' => $isValid,
@@ -393,8 +390,10 @@ try {
         'metadata' => [
             'voucher_id' => $voucherId,
             'reference' => $reference,
+            'origin' => $origin,
             'source_institution' => $sourceInstitution,
             'source_hold_reference' => $sourceHoldReference,
+            'source_asset_type' => $sourceAssetType,
             'note_breakdown' => $noteBreakdown
         ]
     ];
