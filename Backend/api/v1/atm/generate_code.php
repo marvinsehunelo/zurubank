@@ -133,7 +133,9 @@ try {
             ];
             
             if (ob_get_length()) ob_clean();
+            error_log("ZURUBANK: Signing duplicate response");
             $signedPayload = $certManager->createSignedRequest($duplicateResponse, 'ZURUBANK');
+            error_log("ZURUBANK: Duplicate response signed, has signature: " . (isset($signedPayload['signature']) ? 'YES' : 'NO'));
             echo json_encode($signedPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
             exit;
         }
@@ -311,15 +313,32 @@ try {
         'timestamp' => time()
     ];
     
-    error_log("ZURUBANK: Sending signed response");
+    error_log("=== BEFORE CREATING SIGNED RESPONSE ===");
+    error_log("Response payload keys: " . implode(', ', array_keys($responsePayload)));
+    error_log("Response payload preview: " . json_encode($responsePayload));
     
     // Clear out any structural warning buffer artifacts right before printing response
     if (ob_get_length()) {
         ob_clean();
     }
     
+    error_log("ZURUBANK: Calling createSignedRequest...");
     $signedPayload = $certManager->createSignedRequest($responsePayload, 'ZURUBANK');
+    
+    error_log("=== AFTER CREATING SIGNED RESPONSE ===");
+    error_log("Has signature: " . (isset($signedPayload['signature']) ? 'YES' : 'NO'));
+    error_log("Has certificate: " . (isset($signedPayload['certificate']) ? 'YES' : 'NO'));
+    if (isset($signedPayload['signature'])) {
+        error_log("Signature preview: " . substr($signedPayload['signature'], 0, 50) . "...");
+        error_log("Signature length: " . strlen($signedPayload['signature']));
+    }
+    if (isset($signedPayload['certificate'])) {
+        error_log("Certificate length: " . strlen($signedPayload['certificate']));
+    }
+    error_log("Full signed payload (truncated): " . json_encode($signedPayload));
+    
     echo json_encode($signedPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    error_log("ZURUBANK: Response sent successfully");
     exit;
 
 } catch (Exception $e) {
@@ -328,6 +347,7 @@ try {
     }
     
     error_log("ZURUBANK generate_code.php ERROR: " . $e->getMessage());
+    error_log("ERROR trace: " . $e->getTraceAsString());
     
     $errorResponse = [
         'status' => 'ERROR',
@@ -341,10 +361,13 @@ try {
     }
     
     try {
+        error_log("ZURUBANK: Attempting to sign error response");
         $fallbackCertManager = new CertificateManager('ZURUBANK');
         $signedErrorPayload = $fallbackCertManager->createSignedRequest($errorResponse, 'ZURUBANK');
+        error_log("ZURUBANK: Error response signed successfully");
         echo json_encode($signedErrorPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     } catch (Exception $sigError) {
+        error_log("ZURUBANK: Failed to sign error response: " . $sigError->getMessage());
         echo json_encode($errorResponse);
     }
     http_response_code(400);
