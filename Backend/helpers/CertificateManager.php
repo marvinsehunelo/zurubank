@@ -179,7 +179,7 @@ class CertificateManager
         ];
     }
     
-   /**
+  /**
  * Create signed request with certificate (for outgoing)
  * FIXED: Enhanced private key loading with multiple format support
  */
@@ -207,13 +207,11 @@ public function createSignedRequest(array $payload, string $requester): array
     if (!$keyResource) {
         error_log("CertificateManager: Attempting PKCS#8 reformat...");
         
-        // Remove any existing headers/footers and whitespace
         $cleanKey = trim($this->myPrivateKey);
         $cleanKey = preg_replace('/-----BEGIN PRIVATE KEY-----/', '', $cleanKey);
         $cleanKey = preg_replace('/-----END PRIVATE KEY-----/', '', $cleanKey);
-        $cleanKey = preg_replace('/\s+/', '', $cleanKey); // Remove ALL whitespace
+        $cleanKey = preg_replace('/\s+/', '', $cleanKey);
         
-        // Add proper headers with correct line length (64 chars per line)
         $chunks = str_split($cleanKey, 64);
         $formattedKey = "-----BEGIN PRIVATE KEY-----\n" . implode("\n", $chunks) . "\n-----END PRIVATE KEY-----";
         
@@ -221,11 +219,10 @@ public function createSignedRequest(array $payload, string $requester): array
         error_log("CertificateManager: PKCS#8 reformat result: " . ($keyResource ? "SUCCESS" : "FAILED"));
     }
     
-    // Method 3: Try PKCS#1 format (RSA private key)
+    // Method 3: Try PKCS#1 format
     if (!$keyResource && strpos($this->myPrivateKey, 'BEGIN RSA PRIVATE KEY') === false) {
         error_log("CertificateManager: Attempting PKCS#1 conversion...");
         
-        // Convert PKCS#8 to PKCS#1 using OpenSSL command line
         $tempKey = tempnam(sys_get_temp_dir(), 'pkcs8_');
         file_put_contents($tempKey, $this->myPrivateKey);
         
@@ -256,7 +253,6 @@ public function createSignedRequest(array $payload, string $requester): array
     
     if (!$keyResource) {
         error_log("CertificateManager: CRITICAL ERROR - Private key cannot be loaded by OpenSSL. OpenSSL error: " . openssl_error_string());
-        error_log("CertificateManager: Private key preview: " . substr($this->myPrivateKey, 0, 100) . "...");
         return $payload;
     }
     
