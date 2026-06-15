@@ -1,6 +1,6 @@
 <?php
 // zurubank/Backend/helpers/CertificateManager.php
-// ORIGINAL SACCUSSALIS VERSION - Only fixed the private key signing issue
+// ORIGINAL SACCUSSALIS VERSION - Fully fixed syntax & private key normalization
 
 /**
  * Certificate Manager - Visa/Mastercard style PKI
@@ -28,26 +28,35 @@ class CertificateManager
             error_log("CertificateManager: WARNING - No CA certificate found for {$this->myName}");
         }
         
-        // Load this member's private key
-       // Load this member's private key
-$privateKeyContent = getenv($this->myName . '_PRIVATE_KEY_CONTENT');
-if ($privateKeyContent) {
-    // 1. Clean out literal '\n' text strings and windows-style returns
-    $cleanKey = str_replace(['\\n', '\n', "\r"], "\n", $privateKeyContent);
-    
-    // 2. Strip headers/footers and any existing whitespace to normalize it
-    $cleanKey = preg_replace('/-----BEGIN [A-Z ]+-----/', '', $cleanKey);
-    $cleanKey = preg_replace('/-----END [A-Z ]+-----/', '', $cleanKey);
-    $cleanKey = preg_replace('/\s+/', '', $cleanKey);
-    
-    // 3. Re-wrap perfectly into standard 64-character chunks
-    $chunks = str_split($cleanKey, 64);
-    $this->myPrivateKey = "-----BEGIN PRIVATE KEY-----\n" . implode("\n", $chunks) . "\n-----END PRIVATE KEY-----";
-    
-    error_log("CertificateManager: Private key loaded and normalized for {$this->myName}");
-} else {
-    error_log("CertificateManager: WARNING - No private key found for {$this->myName}");
-}
+        // Load and normalize this member's private key
+        $privateKeyContent = getenv($this->myName . '_PRIVATE_KEY_CONTENT');
+        if ($privateKeyContent) {
+            // 1. Clean out literal '\n' text strings and windows-style returns
+            $cleanKey = str_replace(['\\n', '\n', "\r"], "\n", $privateKeyContent);
+            
+            // 2. Strip headers/footers and any existing whitespace to normalize it
+            $cleanKey = preg_replace('/-----BEGIN [A-Z ]+-----/', '', $cleanKey);
+            $cleanKey = preg_replace('/-----END [A-Z ]+-----/', '', $cleanKey);
+            $cleanKey = preg_replace('/\s+/', '', $cleanKey);
+            
+            // 3. Re-wrap perfectly into standard 64-character chunks
+            $chunks = str_split($cleanKey, 64);
+            $this->myPrivateKey = "-----BEGIN PRIVATE KEY-----\n" . implode("\n", $chunks) . "\n-----END PRIVATE KEY-----";
+            
+            error_log("CertificateManager: Private key loaded and normalized for {$this->myName}");
+        } else {
+            error_log("CertificateManager: WARNING - No private key found for {$this->myName}");
+        }
+        
+        // Load this member's certificate
+        $certContent = getenv($this->myName . '_CERT_CONTENT');
+        if ($certContent) {
+            $this->myCertificate = str_replace(['\\n', '\n'], "\n", $certContent);
+            error_log("CertificateManager: Certificate loaded for {$this->myName}");
+        } else {
+            error_log("CertificateManager: WARNING - No certificate found for {$this->myName}");
+        }
+    }
     
     /**
      * Verify a certificate against the trusted CA root
@@ -181,91 +190,91 @@ if ($privateKeyContent) {
         ];
     }
     
-  /**
- * Create signed request with certificate (for outgoing)
- * FIXED: Enhanced private key loading with multiple format support
- */
-public function createSignedRequest(array $payload, string $requester): array
-{
-    if (!$this->myPrivateKey || !$this->myCertificate) {
-        error_log("CertificateManager: Cannot sign request - missing private key or certificate for {$this->myName}");
-        return $payload;
-    }
-    
-    $timestamp = time();
-    $payloadWithTimestamp = array_merge($payload, ['timestamp' => $timestamp]);
-    ksort($payloadWithTimestamp);
-    
-    $jsonToSign = json_encode($payloadWithTimestamp, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-    $signature = '';
-    
-    // FIX: Enhanced private key loading with multiple format support
-    $keyResource = null;
-    
-    // Method 1: Try direct loading first
-    $keyResource = openssl_pkey_get_private($this->myPrivateKey);
-    
-    // Method 2: Ensure proper PKCS#8 formatting
-    if (!$keyResource) {
-        error_log("CertificateManager: Attempting PKCS#8 reformat...");
-        
-        $cleanKey = trim($this->myPrivateKey);
-        $cleanKey = preg_replace('/-----BEGIN PRIVATE KEY-----/', '', $cleanKey);
-        $cleanKey = preg_replace('/-----END PRIVATE KEY-----/', '', $cleanKey);
-        $cleanKey = preg_replace('/\s+/', '', $cleanKey);
-        
-        $chunks = str_split($cleanKey, 64);
-        $formattedKey = "-----BEGIN PRIVATE KEY-----\n" . implode("\n", $chunks) . "\n-----END PRIVATE KEY-----";
-        
-        $keyResource = openssl_pkey_get_private($formattedKey);
-        error_log("CertificateManager: PKCS#8 reformat result: " . ($keyResource ? "SUCCESS" : "FAILED"));
-    }
-    
-    // Method 3: Try PKCS#1 format
-    if (!$keyResource && strpos($this->myPrivateKey, 'BEGIN RSA PRIVATE KEY') === false) {
-        error_log("CertificateManager: Attempting PKCS#1 conversion...");
-        
-        $tempKey = tempnam(sys_get_temp_dir(), 'pkcs8_');
-        file_put_contents($tempKey, $this->myPrivateKey);
-        
-        $tempKeyPkcs1 = tempnam(sys_get_temp_dir(), 'pkcs1_');
-        $cmd = "openssl pkcs8 -in " . escapeshellarg($tempKey) . " -out " . escapeshellarg($tempKeyPkcs1) . " -nocrypt -topk8 2>&1";
-        exec($cmd, $output, $returnCode);
-        
-        if ($returnCode === 0 && file_exists($tempKeyPkcs1)) {
-            $pkcs1Content = file_get_contents($tempKeyPkcs1);
-            if ($pkcs1Content) {
-                $keyResource = openssl_pkey_get_private($pkcs1Content);
-                error_log("CertificateManager: PKCS#1 conversion result: " . ($keyResource ? "SUCCESS" : "FAILED"));
-            }
+    /**
+     * Create signed request with certificate (for outgoing)
+     * FIXED: Enhanced private key loading with multiple format support
+     */
+    public function createSignedRequest(array $payload, string $requester): array
+    {
+        if (!$this->myPrivateKey || !$this->myCertificate) {
+            error_log("CertificateManager: Cannot sign request - missing private key or certificate for {$this->myName}");
+            return $payload;
         }
         
-        @unlink($tempKey);
-        @unlink($tempKeyPkcs1);
+        $timestamp = time();
+        $payloadWithTimestamp = array_merge($payload, ['timestamp' => $timestamp]);
+        ksort($payloadWithTimestamp);
+        
+        $jsonToSign = json_encode($payloadWithTimestamp, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        $signature = '';
+        
+        // FIX: Enhanced private key loading with multiple format support
+        $keyResource = null;
+        
+        // Method 1: Try direct loading first
+        $keyResource = openssl_pkey_get_private($this->myPrivateKey);
+        
+        // Method 2: Ensure proper PKCS#8 formatting
+        if (!$keyResource) {
+            error_log("CertificateManager: Attempting PKCS#8 reformat...");
+            
+            $cleanKey = trim($this->myPrivateKey);
+            $cleanKey = preg_replace('/-----BEGIN PRIVATE KEY-----/', '', $cleanKey);
+            $cleanKey = preg_replace('/-----END PRIVATE KEY-----/', '', $cleanKey);
+            $cleanKey = preg_replace('/\s+/', '', $cleanKey);
+            
+            $chunks = str_split($cleanKey, 64);
+            $formattedKey = "-----BEGIN PRIVATE KEY-----\n" . implode("\n", $chunks) . "\n-----END PRIVATE KEY-----";
+            
+            $keyResource = openssl_pkey_get_private($formattedKey);
+            error_log("CertificateManager: PKCS#8 reformat result: " . ($keyResource ? "SUCCESS" : "FAILED"));
+        }
+        
+        // Method 3: Try PKCS#1 format
+        if (!$keyResource && strpos($this->myPrivateKey, 'BEGIN RSA PRIVATE KEY') === false) {
+            error_log("CertificateManager: Attempting PKCS#1 conversion...");
+            
+            $tempKey = tempnam(sys_get_temp_dir(), 'pkcs8_');
+            file_put_contents($tempKey, $this->myPrivateKey);
+            
+            $tempKeyPkcs1 = tempnam(sys_get_temp_dir(), 'pkcs1_');
+            $cmd = "openssl pkcs8 -in " . escapeshellarg($tempKey) . " -out " . escapeshellarg($tempKeyPkcs1) . " -nocrypt -topk8 2>&1";
+            exec($cmd, $output, $returnCode);
+            
+            if ($returnCode === 0 && file_exists($tempKeyPkcs1)) {
+                $pkcs1Content = file_get_contents($tempKeyPkcs1);
+                if ($pkcs1Content) {
+                    $keyResource = openssl_pkey_get_private($pkcs1Content);
+                    error_log("CertificateManager: PKCS#1 conversion result: " . ($keyResource ? "SUCCESS" : "FAILED"));
+                }
+            }
+            
+            @unlink($tempKey);
+            @unlink($tempKeyPkcs1);
+        }
+        
+        // Method 4: Temp file as last resort
+        if (!$keyResource) {
+            error_log("CertificateManager: Last resort - temp file method...");
+            $tempKey = tempnam(sys_get_temp_dir(), 'privkey_');
+            file_put_contents($tempKey, $this->myPrivateKey);
+            $keyResource = openssl_pkey_get_private('file://' . $tempKey);
+            unlink($tempKey);
+        }
+        
+        if (!$keyResource) {
+            error_log("CertificateManager: CRITICAL ERROR - Private key cannot be loaded by OpenSSL. OpenSSL error: " . openssl_error_string());
+            return $payload;
+        }
+        
+        openssl_sign($jsonToSign, $signature, $keyResource, OPENSSL_ALGO_SHA256);
+        
+        return array_merge($payloadWithTimestamp, [
+            'signature' => base64_encode($signature),
+            'requester' => $requester,
+            'certificate' => $this->myCertificate
+        ]);
     }
-    
-    // Method 4: Temp file as last resort
-    if (!$keyResource) {
-        error_log("CertificateManager: Last resort - temp file method...");
-        $tempKey = tempnam(sys_get_temp_dir(), 'privkey_');
-        file_put_contents($tempKey, $this->myPrivateKey);
-        $keyResource = openssl_pkey_get_private('file://' . $tempKey);
-        unlink($tempKey);
-    }
-    
-    if (!$keyResource) {
-        error_log("CertificateManager: CRITICAL ERROR - Private key cannot be loaded by OpenSSL. OpenSSL error: " . openssl_error_string());
-        return $payload;
-    }
-    
-    openssl_sign($jsonToSign, $signature, $keyResource, OPENSSL_ALGO_SHA256);
-    
-    return array_merge($payloadWithTimestamp, [
-        'signature' => base64_encode($signature),
-        'requester' => $requester,
-        'certificate' => $this->myCertificate
-    ]);
-}
     
     public function isConfigured(): bool
     {
