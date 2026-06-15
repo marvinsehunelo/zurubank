@@ -29,23 +29,25 @@ class CertificateManager
         }
         
         // Load this member's private key
-        $privateKeyContent = getenv($this->myName . '_PRIVATE_KEY_CONTENT');
-        if ($privateKeyContent) {
-            $this->myPrivateKey = str_replace(['\\n', '\n'], "\n", $privateKeyContent);
-            error_log("CertificateManager: Private key loaded for {$this->myName}");
-        } else {
-            error_log("CertificateManager: WARNING - No private key found for {$this->myName}");
-        }
-        
-        // Load this member's certificate
-        $certContent = getenv($this->myName . '_CERT_CONTENT');
-        if ($certContent) {
-            $this->myCertificate = str_replace(['\\n', '\n'], "\n", $certContent);
-            error_log("CertificateManager: Certificate loaded for {$this->myName}");
-        } else {
-            error_log("CertificateManager: WARNING - No certificate found for {$this->myName}");
-        }
-    }
+       // Load this member's private key
+$privateKeyContent = getenv($this->myName . '_PRIVATE_KEY_CONTENT');
+if ($privateKeyContent) {
+    // 1. Clean out literal '\n' text strings and windows-style returns
+    $cleanKey = str_replace(['\\n', '\n', "\r"], "\n", $privateKeyContent);
+    
+    // 2. Strip headers/footers and any existing whitespace to normalize it
+    $cleanKey = preg_replace('/-----BEGIN [A-Z ]+-----/', '', $cleanKey);
+    $cleanKey = preg_replace('/-----END [A-Z ]+-----/', '', $cleanKey);
+    $cleanKey = preg_replace('/\s+/', '', $cleanKey);
+    
+    // 3. Re-wrap perfectly into standard 64-character chunks
+    $chunks = str_split($cleanKey, 64);
+    $this->myPrivateKey = "-----BEGIN PRIVATE KEY-----\n" . implode("\n", $chunks) . "\n-----END PRIVATE KEY-----";
+    
+    error_log("CertificateManager: Private key loaded and normalized for {$this->myName}");
+} else {
+    error_log("CertificateManager: WARNING - No private key found for {$this->myName}");
+}
     
     /**
      * Verify a certificate against the trusted CA root
