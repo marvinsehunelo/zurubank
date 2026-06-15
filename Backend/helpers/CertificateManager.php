@@ -179,60 +179,95 @@ class CertificateManager
         ];
     }
     
-    /**
-     * Create signed request with certificate (for outgoing)
-     * FIXED: Added proper key loading with temp file fallback
-     */
-    public function createSignedRequest(array $payload, string $requester): array
-    {
-        if (!$this->myPrivateKey || !$this->myCertificate) {
-            error_log("CertificateManager: Cannot sign request - missing private key or certificate for {$this->myName}");
-            return $payload;
-        }
-        
-        $timestamp = time();
-        $payloadWithTimestamp = array_merge($payload, ['timestamp' => $timestamp]);
-        ksort($payloadWithTimestamp);
-        
-        $jsonToSign = json_encode($payloadWithTimestamp, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-        $signature = '';
-        
-        // FIX: Try multiple methods to load private key
-        $keyResource = openssl_pkey_get_private($this->myPrivateKey);
-        
-        // Fallback 1: Try writing to temp file (most reliable for Railway)
-        if (!$keyResource) {
-            error_log("CertificateManager: Trying temp file method for private key...");
-            $tempKey = tempnam(sys_get_temp_dir(), 'privkey_');
-            file_put_contents($tempKey, $this->myPrivateKey);
-            $keyResource = openssl_pkey_get_private('file://' . $tempKey);
-            unlink($tempKey);
-        }
-        
-        // Fallback 2: Try reformatting with proper line breaks
-        if (!$keyResource) {
-            error_log("CertificateManager: Trying reformat with line breaks...");
-            $cleanKey = trim($this->myPrivateKey);
-            $cleanKey = preg_replace('/\s+/', "\n", $cleanKey);
-            if (strpos($cleanKey, '-----BEGIN PRIVATE KEY-----') === false) {
-                $cleanKey = "-----BEGIN PRIVATE KEY-----\n" . $cleanKey . "\n-----END PRIVATE KEY-----";
-            }
-            $keyResource = openssl_pkey_get_private($cleanKey);
-        }
-
-        if (!$keyResource) {
-            error_log("CertificateManager: CRITICAL ERROR - Private key cannot be loaded by OpenSSL. OpenSSL error: " . openssl_error_string());
-            return $payload;
-        }
-        
-        openssl_sign($jsonToSign, $signature, $keyResource, OPENSSL_ALGO_SHA256);
-        
-        return array_merge($payloadWithTimestamp, [
-            'signature' => base64_encode($signature),
-            'requester' => $requester,
-            'certificate' => $this->myCertificate
-        ]);
+   /**
+ * Create signed request with certificate (for outgoing)
+ * FIXED: Enhanced private key loading with multiple format support
+ */
+public function createSignedRequest(array $payload, string $requester): array
+{
+    if (!$this->myPrivateKey || !$this->myCertificate) {
+        error_log("CertificateManager: Cannot sign request - missing private key or certificate for {$this->myName}");
+        return $payload;
     }
+    
+    $timestamp = time();
+    $payloadWithTimestamp = array_merge($payload, ['timestamp' => $timestamp]);
+    ksort($payloadWithTimestamp);
+    
+    $jsonToSign = json_encode($payloadWithTimestamp, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    $signature = '';
+    
+    // FIX: Enhanced private key loading with multiple format support
+    $keyResource = null;
+    
+    // Method 1: Try direct loading first
+    $keyResource = openssl_pkey_get_private($this->myPrivateKey);
+    
+    // Method 2: Ensure proper PKCS#8 formatting
+    if (!$keyResource) {
+        error_log("CertificateManager: Attempting PKCS#8 reformat...");
+        
+        // Remove any existing headers/footers and whitespace
+        $cleanKey = trim($this->myPrivateKey);
+        $cleanKey = preg_replace('/-----BEGIN PRIVATE KEY-----/', '', $cleanKey);
+        $cleanKey = preg_replace('/-----END PRIVATE KEY-----/', '', $cleanKey);
+        $cleanKey = preg_replace('/\s+/', '', $cleanKey); // Remove ALL whitespace
+        
+        // Add proper headers with correct line length (64 chars per line)
+        $chunks = str_split($cleanKey, 64);
+        $formattedKey = "-----BEGIN PRIVATE KEY-----\n" . implode("\n", $chunks) . "\n-----END PRIVATE KEY-----";
+        
+        $keyResource = openssl_pkey_get_private($formattedKey);
+        error_log("CertificateManager: PKCS#8 reformat result: " . ($keyResource ? "SUCCESS" : "FAILED"));
+    }
+    
+    // Method 3: Try PKCS#1 format (RSA private key)
+    if (!$keyResource && strpos($this->myPrivateKey, 'BEGIN RSA PRIVATE KEY') === false) {
+        error_log("CertificateManager: Attempting PKCS#1 conversion...");
+        
+        // Convert PKCS#8 to PKCS#1 using OpenSSL command line
+        $tempKey = tempnam(sys_get_temp_dir(), 'pkcs8_');
+        file_put_contents($tempKey, $this->myPrivateKey);
+        
+        $tempKeyPkcs1 = tempnam(sys_get_temp_dir(), 'pkcs1_');
+        $cmd = "openssl pkcs8 -in " . escapeshellarg($tempKey) . " -out " . escapeshellarg($tempKeyPkcs1) . " -nocrypt -topk8 2>&1";
+        exec($cmd, $output, $returnCode);
+        
+        if ($returnCode === 0 && file_exists($tempKeyPkcs1)) {
+            $pkcs1Content = file_get_contents($tempKeyPkcs1);
+            if ($pkcs1Content) {
+                $keyResource = openssl_pkey_get_private($pkcs1Content);
+                error_log("CertificateManager: PKCS#1 conversion result: " . ($keyResource ? "SUCCESS" : "FAILED"));
+            }
+        }
+        
+        @unlink($tempKey);
+        @unlink($tempKeyPkcs1);
+    }
+    
+    // Method 4: Temp file as last resort
+    if (!$keyResource) {
+        error_log("CertificateManager: Last resort - temp file method...");
+        $tempKey = tempnam(sys_get_temp_dir(), 'privkey_');
+        file_put_contents($tempKey, $this->myPrivateKey);
+        $keyResource = openssl_pkey_get_private('file://' . $tempKey);
+        unlink($tempKey);
+    }
+    
+    if (!$keyResource) {
+        error_log("CertificateManager: CRITICAL ERROR - Private key cannot be loaded by OpenSSL. OpenSSL error: " . openssl_error_string());
+        error_log("CertificateManager: Private key preview: " . substr($this->myPrivateKey, 0, 100) . "...");
+        return $payload;
+    }
+    
+    openssl_sign($jsonToSign, $signature, $keyResource, OPENSSL_ALGO_SHA256);
+    
+    return array_merge($payloadWithTimestamp, [
+        'signature' => base64_encode($signature),
+        'requester' => $requester,
+        'certificate' => $this->myCertificate
+    ]);
+}
     
     public function isConfigured(): bool
     {
