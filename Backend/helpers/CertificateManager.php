@@ -206,74 +206,110 @@ class CertificateManager
         ];
     }
     
-    /**
-     * Create signed request with certificate (for outgoing)
-     * Uses repaired key with automatic retry
-     */
-    public function createSignedRequest(array $payload, string $requester): array
-    {
-        if (!$this->myPrivateKey || !$this->myCertificate) {
-            error_log("CertificateManager: Cannot sign request - missing private key or certificate for {$this->myName}");
-            return $payload;
-        }
-        
-        $timestamp = time();
-        $payloadWithTimestamp = array_merge($payload, ['timestamp' => $timestamp]);
-        ksort($payloadWithTimestamp);
-        
-        $jsonToSign = json_encode($payloadWithTimestamp, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-        $signature = '';
-        
-        // Load private key - try multiple times with different formats
-        $keyResource = openssl_pkey_get_private($this->myPrivateKey);
-        
-        // If that fails, try one more repair attempt
-        if (!$keyResource) {
-            error_log("CertificateManager: Primary key load failed, attempting emergency repair...");
-            
-            // Emergency repair - extract and rebuild again
-            $base64Content = preg_replace('/-----BEGIN PRIVATE KEY-----/', '', $this->myPrivateKey);
-            $base64Content = preg_replace('/-----END PRIVATE KEY-----/', '', $base64Content);
-            $base64Content = preg_replace('/[^A-Za-z0-9+\/=]/', '', $base64Content);
-            
-            $chunks = str_split($base64Content, 64);
-            $repairedKey = "-----BEGIN PRIVATE KEY-----\n" . implode("\n", $chunks) . "\n-----END PRIVATE KEY-----";
-            
-            error_log("CertificateManager: Emergency repair - new key length: " . strlen($repairedKey));
-            
-            $keyResource = openssl_pkey_get_private($repairedKey);
-            
-            if ($keyResource) {
-                // Save the repaired key for future use
-                $this->myPrivateKey = $repairedKey;
-                error_log("CertificateManager: Emergency repair SUCCESSFUL");
-            }
-        }
-        
-        if (!$keyResource) {
-            error_log("CertificateManager: Private key load FAILED after all attempts");
-            
-            while ($err = openssl_error_string()) {
-                error_log("OpenSSL Error: " . $err);
-            }
-            
-            error_log("Key first 40 chars: " . substr($this->myPrivateKey, 0, 40));
-            error_log("Key last 40 chars: " . substr($this->myPrivateKey, -40));
-            
-            return $payload;
-        }
-        
-        openssl_sign($jsonToSign, $signature, $keyResource, OPENSSL_ALGO_SHA256);
-        
-        // Clean up key resource
-        openssl_free_key($keyResource);
-        
-        return array_merge($payloadWithTimestamp, [
-            'signature' => base64_encode($signature),
-            'requester' => $requester,
-            'certificate' => $this->myCertificate
-        ]);
+  /**
+ * Create signed request with certificate (for outgoing)
+ * Uses repaired key with automatic retry
+ */
+public function createSignedRequest(array $payload, string $requester): array
+{
+    error_log("=== CREATE SIGNED REQUEST START ===");
+    error_log("Requester: {$requester}");
+    error_log("MyName: {$this->myName}");
+    error_log("Has private key: " . ($this->myPrivateKey ? 'YES' : 'NO'));
+    error_log("Has certificate: " . ($this->myCertificate ? 'YES' : 'NO'));
+    error_log("Payload keys: " . implode(', ', array_keys($payload)));
+    
+    if (!$this->myPrivateKey || !$this->myCertificate) {
+        error_log("CertificateManager: Cannot sign request - missing private key or certificate for {$this->myName}");
+        error_log("Private key missing: " . ($this->myPrivateKey ? 'NO' : 'YES'));
+        error_log("Certificate missing: " . ($this->myCertificate ? 'NO' : 'YES'));
+        return $payload;
     }
+    
+    $timestamp = time();
+    $payloadWithTimestamp = array_merge($payload, ['timestamp' => $timestamp]);
+    ksort($payloadWithTimestamp);
+    
+    $jsonToSign = json_encode($payloadWithTimestamp, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    error_log("JSON to sign length: " . strlen($jsonToSign));
+    error_log("JSON to sign preview: " . substr($jsonToSign, 0, 200));
+    
+    $signature = '';
+    
+    // Load private key - try multiple times with different formats
+    error_log("Attempting to load private key...");
+    error_log("Private key format check - starts with BEGIN: " . (strpos($this->myPrivateKey, 'BEGIN PRIVATE KEY') !== false ? 'YES' : 'NO'));
+    
+    $keyResource = openssl_pkey_get_private($this->myPrivateKey);
+    
+    if (!$keyResource) {
+        error_log("CertificateManager: Primary key load FAILED");
+        
+        // Log OpenSSL errors
+        $opensslErrors = [];
+        while ($err = openssl_error_string()) {
+            $opensslErrors[] = $err;
+            error_log("OpenSSL Error: " . $err);
+        }
+        
+        error_log("CertificateManager: Attempting emergency repair...");
+        
+        // Emergency repair - extract and rebuild again
+        $base64Content = preg_replace('/-----BEGIN PRIVATE KEY-----/', '', $this->myPrivateKey);
+        $base64Content = preg_replace('/-----END PRIVATE KEY-----/', '', $base64Content);
+        $base64Content = preg_replace('/[^A-Za-z0-9+\/=]/', '', $base64Content);
+        
+        error_log("Emergency repair - Base64 length: " . strlen($base64Content));
+        
+        $chunks = str_split($base64Content, 64);
+        $repairedKey = "-----BEGIN PRIVATE KEY-----\n" . implode("\n", $chunks) . "\n-----END PRIVATE KEY-----";
+        
+        error_log("Emergency repair - New key length: " . strlen($repairedKey));
+        error_log("Emergency repair - Key preview: " . substr($repairedKey, 0, 100));
+        
+        $keyResource = openssl_pkey_get_private($repairedKey);
+        
+        if ($keyResource) {
+            // Save the repaired key for future use
+            $this->myPrivateKey = $repairedKey;
+            error_log("CertificateManager: Emergency repair SUCCESSFUL");
+        } else {
+            error_log("CertificateManager: Emergency repair FAILED");
+            while ($err = openssl_error_string()) {
+                error_log("OpenSSL Error after repair: " . $err);
+            }
+        }
+    } else {
+        error_log("CertificateManager: Primary key load SUCCESSFUL");
+    }
+    
+    if (!$keyResource) {
+        error_log("CertificateManager: Private key load FAILED after all attempts");
+        error_log("Key first 40 chars: " . substr($this->myPrivateKey, 0, 40));
+        error_log("Key last 40 chars: " . substr($this->myPrivateKey, -40));
+        return $payload;
+    }
+    
+    error_log("Calling openssl_sign...");
+    $signResult = openssl_sign($jsonToSign, $signature, $keyResource, OPENSSL_ALGO_SHA256);
+    error_log("openssl_sign result: " . ($signResult ? 'SUCCESS' : 'FAILURE'));
+    error_log("Generated signature length: " . strlen($signature));
+    
+    // Clean up key resource
+    openssl_free_key($keyResource);
+    
+    $signedPayload = array_merge($payloadWithTimestamp, [
+        'signature' => base64_encode($signature),
+        'requester' => $requester,
+        'certificate' => $this->myCertificate
+    ]);
+    
+    error_log("=== CREATE SIGNED REQUEST COMPLETE ===");
+    error_log("Signature base64 length: " . strlen(base64_encode($signature)));
+    error_log("Certificate length: " . strlen($this->myCertificate));
+    
+    return $signedPayload;
+}
     
     public function isConfigured(): bool
     {
