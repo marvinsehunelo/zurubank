@@ -43,7 +43,7 @@ try {
             'verified' => true,
             'data' => [
                 'account_number' => $account_id,
-                'account_name' => 'Test Account',
+                'account_type' => 'Test Account',
                 'holder_name' => 'Test User',
                 'balance' => 5000.00,
                 'available_balance' => 5000.00,
@@ -129,11 +129,11 @@ try {
     }
     
     // ============================================================
-    // CHECK ACCOUNT TABLE
+    // CHECK ACCOUNT TABLE - FIXED COLUMN NAMES
     // ============================================================
     if ($balance === 0 && empty($voucherData)) {
         $stmt = $pdo->prepare("
-            SELECT a.account_number, a.balance, a.currency, a.account_name, a.status, a.user_id
+            SELECT a.account_number, a.balance, a.currency, a.account_type, a.status, a.user_id
             FROM accounts a
             WHERE a.account_number = :account_number OR a.phone = :account_number
             LIMIT 1
@@ -144,7 +144,7 @@ try {
         if ($account) {
             $balance = (float)$account['balance'];
             $currency = $account['currency'] ?? 'BWP';
-            $holderName = $account['account_name'] ?? 'Account Holder';
+            $holderName = $account['account_type'] ?? 'Account Holder';
             $accountNumber = $account['account_number'];
             $accountStatus = $account['status'] ?? 'active';
             error_log("ZURUBANK: Found account {$account_id} with balance {$balance}");
@@ -159,7 +159,7 @@ try {
         'verified' => true,
         'data' => [
             'account_number' => $accountNumber ?? $account_id,
-            'account_name' => $holderName ?? 'Account Holder',
+            'account_type' => $holderName ?? 'Account Holder',
             'holder_name' => $holderName ?? null,
             'balance' => $balance,
             'available_balance' => $balance,
