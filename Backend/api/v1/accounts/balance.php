@@ -135,7 +135,7 @@ try {
         $stmt = $pdo->prepare("
             SELECT a.account_number, a.balance, a.currency, a.account_type, a.status, a.user_id
             FROM accounts a
-            WHERE a.account_number = :account_number OR a.phone = :account_number
+            WHERE a.account_number = :account_number
             LIMIT 1
         ");
         $stmt->execute(['account_number' => $account_id]);
