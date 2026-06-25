@@ -1,37 +1,4 @@
 <?php
-// Backend/api/v1/accounts/balance.php
-// Get account balance (supports JWT for users OR certificate for institution-to-institution)
-// NOW ALSO CHECKS VOUCHER BALANCE
-// Backend/api/v1/accounts/balance.php
-// Add this right after header('Content-Type: application/json');
-
-// ============================================================
-// TEST MODE - Disable authentication for debugging
-// ============================================================
-$testMode = true; // Set to false for production
-
-if ($testMode) {
-    error_log("ZURUBANK: Running in TEST MODE - authentication bypassed");
-    
-    // Get input data
-    $input = json_decode(file_get_contents('php://input'), true);
-    $account_id = $_GET['account_id'] ?? $_POST['account_id'] ?? $input['source_identifier'] ?? $input['account_id'] ?? '';
-    $asset_type = $_GET['asset_type'] ?? $_POST['asset_type'] ?? $input['asset_type'] ?? 'ACCOUNT';
-    $pin = $input['pin'] ?? $input['wallet_pin'] ?? null;
-    
-    if (empty($account_id)) {
-        http_response_code(400);
-        echo json_encode([
-            'status' => 'error',
-            'message' => 'account_id or source_identifier required',
-            'timestamp' => time()
-        ]);
-        exit;
-    }
-    
-    // Skip to balance check
-    goto process_balance;
-}
 
 require_once __DIR__ . '/../../../config/db.php';
 require_once __DIR__ . '/../../../config/jwt.php';
