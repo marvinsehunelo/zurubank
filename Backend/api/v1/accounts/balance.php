@@ -3,10 +3,10 @@
 // Get account balance (supports JWT for users OR certificate for institution-to-institution)
 // NOW ALSO CHECKS VOUCHER BALANCE
 
-require_once '../../config/db.php';
-require_once '../../config/jwt.php';
-require_once '../../helpers/crypto.php';
-require_once '../../helpers/CertificateManager.php';
+require_once '../../../../config/db.php';
+require_once '../../../../config/jwt.php';
+require_once '../../../../helpers/crypto.php';
+require_once '../../../../helpers/CertificateManager.php';
 
 header('Content-Type: application/json');
 
