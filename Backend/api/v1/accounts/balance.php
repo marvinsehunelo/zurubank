@@ -30,7 +30,7 @@ if ($testMode) {
     }
     
     // Skip to balance check
-    goto check_balance;
+    goto process_balance;
 }
 
 require_once __DIR__ . '/../../../config/db.php';
