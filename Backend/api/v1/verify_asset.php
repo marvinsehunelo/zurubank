@@ -1,7 +1,7 @@
 <?php
 /**
  * verify_asset_zurubank.php
- * Asset Verification for Zurubank - VOUCHER and CASHOUT-VOUCHER
+ * Asset Verification for Zurubank - VOUCHER, CASHOUT-VOUCHER, and ACCOUNT
  */
 
 require_once __DIR__ . '/../../config/db.php';
@@ -51,6 +51,12 @@ $voucherPin = $input['voucher_pin'] ??
               $input['source']['pin'] ??
               null;
 
+$accountNumber = $input['source_identifier'] ?? 
+                 $input['account_number'] ?? 
+                 $input['source']['account_number'] ??
+                 $input['source']['identifier'] ??
+                 null;
+
 $claimantPhone = $input['claimant_phone'] ?? 
                  $input['phone'] ?? 
                  $input['source']['voucher']['claimant_phone'] ??
@@ -60,18 +66,18 @@ $claimantPhone = $input['claimant_phone'] ??
 $amount = floatval($input['amount'] ?? $input['value'] ?? 0);
 $reference = $input['reference'] ?? $input['transaction_reference'] ?? null;
 
-error_log("Normalized - Type: $assetType, Voucher: $voucherNumber, Phone: $claimantPhone, Amount: $amount");
+error_log("Normalized - Type: $assetType, Voucher: $voucherNumber, Account: $accountNumber, Phone: $claimantPhone, Amount: $amount");
 
-// ZURUBANK HANDLES VOUCHER AND CASHOUT-VOUCHER
-if ($assetType !== 'VOUCHER' && $assetType !== 'CASHOUT-VOUCHER') {
+// ZURUBANK SUPPORTS VOUCHER, CASHOUT-VOUCHER, AND ACCOUNT
+if ($assetType !== 'VOUCHER' && $assetType !== 'CASHOUT-VOUCHER' && $assetType !== 'ACCOUNT') {
     error_log("ERROR: Unsupported asset type for ZURUBANK: $assetType");
     echo json_encode([
         "success" => true,
         "verified" => false,
-        "message" => "ZURUBANK only supports VOUCHER or CASHOUT-VOUCHER asset type",
+        "message" => "ZURUBANK only supports VOUCHER, CASHOUT-VOUCHER, or ACCOUNT asset type",
         "debug" => [
             "received_type" => $assetType,
-            "supported_types" => ["VOUCHER", "CASHOUT-VOUCHER"]
+            "supported_types" => ["VOUCHER", "CASHOUT-VOUCHER", "ACCOUNT"]
         ]
     ]);
     exit;
@@ -82,6 +88,86 @@ try {
         throw new Exception("Database connection failed to initialize.");
     }
 
+    // ============================================================
+    // HANDLE ACCOUNT TYPE
+    // ============================================================
+    if ($assetType === 'ACCOUNT') {
+        error_log("Processing ACCOUNT verification for: $accountNumber");
+        
+        if (empty($accountNumber)) {
+            throw new Exception("Account number required for ACCOUNT asset type");
+        }
+
+        // Query the accounts table
+        $stmt = $pdo->prepare("
+            SELECT 
+                account_id,
+                user_id,
+                account_number,
+                account_type,
+                balance,
+                currency,
+                status,
+                created_at
+            FROM accounts
+            WHERE account_number = :account_number
+            LIMIT 1
+        ");
+        $stmt->execute(['account_number' => $accountNumber]);
+        $account = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if (!$account) {
+            throw new Exception("Account not found: $accountNumber");
+        }
+
+        if ($account['status'] !== 'active') {
+            throw new Exception("Account is not active (status: {$account['status']})");
+        }
+
+        $availableBalance = floatval($account['balance']);
+        
+        // Check if sufficient balance
+        if ($amount > 0 && $availableBalance < $amount) {
+            throw new Exception("Insufficient balance. Available: $availableBalance, Requested: $amount");
+        }
+
+        // Get holder name from users table
+        $holderName = "Account Holder";
+        if ($account['user_id']) {
+            $userStmt = $pdo->prepare("SELECT full_name FROM users WHERE user_id = ?");
+            $userStmt->execute([$account['user_id']]);
+            $user = $userStmt->fetch(PDO::FETCH_ASSOC);
+            if ($user && $user['full_name']) {
+                $holderName = $user['full_name'];
+            }
+        }
+
+        $responsePayload = [
+            "success" => true,
+            "verified" => true,
+            "asset_id" => $account['account_id'],
+            "asset_type" => "ACCOUNT",
+            "account_number" => $account['account_number'],
+            "available_balance" => $availableBalance,
+            "balance" => $availableBalance,
+            "holder_name" => $holderName,
+            "currency" => $account['currency'] ?? 'BWP',
+            "account_type" => $account['account_type'],
+            "metadata" => [
+                "account_id" => $account['account_id'],
+                "user_id" => $account['user_id'],
+                "status" => $account['status'],
+                "created_at" => $account['created_at']
+            ]
+        ];
+
+        send_signed_response($responsePayload);
+        exit;
+    }
+
+    // ============================================================
+    // HANDLE VOUCHER AND CASHOUT-VOUCHER TYPE
+    // ============================================================
     if (empty($voucherNumber)) {
         throw new Exception("Voucher number required");
     }
@@ -180,10 +266,6 @@ try {
         }
     }
     
-    // ============================================================
-    // BUILD SIGNED RESPONSE USING THE NEW crypto.php FUNCTIONS
-    // ============================================================
-    
     $responsePayload = [
         "success" => true,
         "verified" => true,
@@ -206,7 +288,6 @@ try {
         ]
     ];
     
-    // Send signed response (this adds signature and timestamp automatically)
     send_signed_response($responsePayload);
 
 } catch (Exception $e) {
@@ -225,7 +306,8 @@ try {
         "timestamp" => time(),
         "debug" => [
             "asset_type" => $assetType,
-            "voucher_number" => $voucherNumber
+            "voucher_number" => $voucherNumber,
+            "account_number" => $accountNumber
         ]
     ]);
 }
