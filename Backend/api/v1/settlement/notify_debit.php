@@ -2,7 +2,7 @@
 // --------------------------------------------------
 // notify_debit.php
 // Release held voucher and record interbank settlement
-// UPDATED: Certificate-based verification (Visa/Mastercard model)
+// UPDATED: Certificate-based verification (Visa/Mastercard model)i
 // --------------------------------------------------
 
 header('Content-Type: application/json');
