@@ -3,10 +3,10 @@
  * backend/api/v1/hold.php
  * Unified hold endpoint for Zurubank
  * Handles VOUCHER, ACCOUNT, and WALLET holds
- * UPDATED: Certificate-based verification (Visa/Mastercard model)
- * UPDATED: Same voucher number detection as verify_asset.php
- * FIXED: Removed non-existent column 'hold_expires_at'
- * FIXED: Syntax errors in array definitions
+ * 
+ * FIXED: Only uses columns that exist in instant_money_vouchers table
+ * Available columns: status, source_hold_reference, reference
+ * NOT available: updated_at, hold_expires_at, held_by, hold_signature_verified
  */
 
 require_once __DIR__ . '/../../config/db.php';
@@ -68,8 +68,7 @@ try {
     $assetType = strtoupper($input['asset_type'] ?? $input['type'] ?? '');
     
     // ============================================================
-    // FIX: Extract voucher_number from MULTIPLE locations
-    // Same logic as verify_asset.php
+    // Extract voucher_number from MULTIPLE locations
     // ============================================================
     $voucherNumber = $input['voucher_number'] ?? 
                      $input['voucher'] ?? 
@@ -89,12 +88,10 @@ try {
     $phone = $input['phone'] ?? $input['wallet_phone'] ?? $input['ewallet_phone'] ?? null;
     
     // ============================================================
-    // FIX: If asset_type is VOUCHER but voucher_number is missing,
+    // If asset_type is VOUCHER but voucher_number is missing,
     // check if source_identifier is actually the voucher number
-    // Same logic as verify_asset.php
     // ============================================================
     if (($assetType === 'VOUCHER' || $assetType === 'CASHOUT-VOUCHER') && empty($voucherNumber)) {
-        // The source_identifier might actually be the voucher number
         if (!empty($accountNumber) && preg_match('/^\d{12,15}$/', $accountNumber)) {
             $voucherNumber = $accountNumber;
             error_log("Using source_identifier as voucher_number: $voucherNumber");
@@ -102,18 +99,13 @@ try {
     }
     
     $amount = floatval($input['amount'] ?? $input['value'] ?? 0);
-    
-    // IMPORTANT: Get the hold reference from the payload
-    // SwapService sends it as 'reference' in the payload
     $holdReference = $input['reference'] ?? $input['hold_reference'] ?? null;
     
     if (!$holdReference) {
         throw new Exception("Hold reference is required");
     }
     
-    // Validate based on asset type
     if (empty($assetType)) {
-        // Try to infer from provided identifiers
         if ($voucherNumber) $assetType = 'VOUCHER';
         elseif ($accountNumber) $assetType = 'ACCOUNT';
         elseif ($phone) $assetType = 'WALLET';
@@ -122,7 +114,6 @@ try {
     
     error_log("ZURUBANK HOLD: Action: $action, AssetType: $assetType, HoldRef: $holdReference, Amount: $amount");
 
-    // Validate required fields
     if ($amount <= 0) {
         throw new Exception("Valid amount required");
     }
@@ -134,18 +125,15 @@ try {
     $assetId = null;
     $holdPlaced = false;
 
-    // Process based on asset type and action
+    // ============================================================
+    // VOUCHER HANDLING - FIXED: Only uses columns that exist
+    // ============================================================
     if ($assetType === 'VOUCHER') {
-        // ============================================================
-        // VOUCHER HANDLING
-        // ============================================================
         if (!$voucherNumber) {
-            // Log all fields for debugging
             error_log("Voucher number missing. Available fields: " . implode(', ', array_keys($input)));
             throw new Exception("Voucher number required. Available fields: " . implode(', ', array_keys($input)));
         }
 
-        // Lock the voucher row for update
         $stmt = $pdo->prepare("
             SELECT voucher_id, amount, status, recipient_phone, currency, voucher_pin
             FROM instant_money_vouchers
@@ -157,7 +145,6 @@ try {
         $voucher = $stmt->fetch(PDO::FETCH_ASSOC);
 
         if (!$voucher) {
-            // Try with trim
             $stmt = $pdo->prepare("
                 SELECT * FROM instant_money_vouchers
                 WHERE TRIM(voucher_number) = TRIM(:voucher_number)
@@ -179,12 +166,13 @@ try {
                 throw new Exception("Voucher cannot be held (status: {$voucher['status']})");
             }
             
-            // ✅ FIX: Only use columns that exist in the table
+            // ✅ CORRECT: Only use columns that exist in instant_money_vouchers
+            // Available: status, source_hold_reference
+            // NOT available: updated_at, hold_expires_at, held_by, hold_signature_verified
             $stmt = $pdo->prepare("
                 UPDATE instant_money_vouchers
                 SET status = 'hold',
-                    source_hold_reference = :hold_reference,
-                    updated_at = NOW()
+                    source_hold_reference = :hold_reference
                 WHERE voucher_id = :voucher_id
             ");
             $stmt->execute([
@@ -204,8 +192,6 @@ try {
                 'voucher_number' => $voucherNumber,
                 'amount' => floatval($voucher['amount']),
                 'currency' => $voucher['currency'] ?? 'BWP',
-                'requester' => $requester,
-                'signature_verified' => $isValid,
                 'recipient_phone' => $voucher['recipient_phone']
             ];
             
@@ -214,12 +200,11 @@ try {
                 throw new Exception("Voucher is not currently on hold");
             }
             
-            // ✅ FIX: Only use columns that exist
+            // ✅ CORRECT: Only use columns that exist
             $stmt = $pdo->prepare("
                 UPDATE instant_money_vouchers
                 SET status = 'active',
-                    source_hold_reference = NULL,
-                    updated_at = NOW()
+                    source_hold_reference = NULL
                 WHERE voucher_id = :voucher_id
                 AND source_hold_reference = :hold_reference
             ");
@@ -238,34 +223,25 @@ try {
                 'asset_type' => 'VOUCHER',
                 'asset_id' => $voucher['voucher_id'],
                 'voucher_number' => $voucherNumber,
-                'amount' => floatval($voucher['amount']),
-                'requester' => $requester,
-                'signature_verified' => $isValid
+                'amount' => floatval($voucher['amount'])
             ];
             
         } else {
             throw new Exception("Unsupported action for voucher: $action");
         }
 
+    // ============================================================
+    // ACCOUNT HANDLING
+    // ============================================================
     } elseif ($assetType === 'ACCOUNT') {
-        // ============================================================
-        // ACCOUNT HANDLING
-        // ============================================================
         if (!$accountNumber) {
             throw new Exception("Account number required");
         }
 
-        // Lock the account row with balance fields
         $stmt = $pdo->prepare("
             SELECT 
-                account_id, 
-                account_number, 
-                balance, 
-                available_balance,
-                held_amount,
-                status, 
-                currency, 
-                user_id
+                account_id, account_number, balance, available_balance, held_amount,
+                status, currency, user_id
             FROM accounts
             WHERE account_number = :account_number
             LIMIT 1
@@ -302,45 +278,31 @@ try {
                 )
             ");
 
-            // Ensure available_balance and held_amount columns exist
-            $pdo->exec("
-                ALTER TABLE accounts 
-                ADD COLUMN IF NOT EXISTS available_balance DECIMAL(20,4) DEFAULT 0
-            ");
-            $pdo->exec("
-                ALTER TABLE accounts 
-                ADD COLUMN IF NOT EXISTS held_amount DECIMAL(20,4) DEFAULT 0
-            ");
+            $pdo->exec("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS available_balance DECIMAL(20,4) DEFAULT 0");
+            $pdo->exec("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS held_amount DECIMAL(20,4) DEFAULT 0");
 
-            // Check available balance (not total balance)
             $availableBalance = floatval($account['available_balance'] ?? $account['balance']);
             
             if ($availableBalance < $amount) {
                 throw new Exception(
                     "Insufficient available balance. "
-                    . "Available: $availableBalance, Requested: $amount, "
-                    . "Total Balance: {$account['balance']}, Held: {$account['held_amount']}"
+                    . "Available: $availableBalance, Requested: $amount"
                 );
             }
 
-            // Create hold record
             $stmt = $pdo->prepare("
                 INSERT INTO financial_holds 
                     (account_id, amount, hold_reference, status, requester, signature_verified, expires_at)
-                VALUES 
-                    (?, ?, ?, 'HELD', ?, ?, NOW() + INTERVAL '24 hours')
+                VALUES (?, ?, ?, 'HELD', ?, ?, NOW() + INTERVAL '24 hours')
                 RETURNING id
             ");
             $stmt->execute([$account['account_id'], $amount, $holdReference, $requester, $isValid ? 1 : 0]);
             $holdId = $stmt->fetchColumn();
 
-            // Reserve the amount - reduce available_balance, increase held_amount
             $stmt = $pdo->prepare("
                 UPDATE accounts 
-                SET 
-                    available_balance = available_balance - :amount,
-                    held_amount = held_amount + :amount,
-                    updated_at = NOW()
+                SET available_balance = available_balance - :amount,
+                    held_amount = held_amount + :amount
                 WHERE account_id = :account_id 
                 AND available_balance >= :amount
                 RETURNING balance, available_balance, held_amount
@@ -352,7 +314,7 @@ try {
             $updated = $stmt->fetch(PDO::FETCH_ASSOC);
 
             if (!$updated) {
-                throw new Exception("Failed to reserve funds - balance may have changed");
+                throw new Exception("Failed to reserve funds");
             }
             
             $assetId = $account['account_id'];
@@ -360,7 +322,7 @@ try {
             $responsePayload = [
                 'status' => 'SUCCESS',
                 'hold_placed' => true,
-                'message' => 'Hold placed on account - funds reserved',
+                'message' => 'Hold placed on account',
                 'hold_reference' => $holdReference,
                 'asset_type' => 'ACCOUNT',
                 'asset_id' => $account['account_id'],
@@ -370,14 +332,10 @@ try {
                 'total_balance' => floatval($updated['balance']),
                 'available_balance' => floatval($updated['available_balance']),
                 'held_amount' => floatval($updated['held_amount']),
-                'requester' => $requester,
-                'signature_verified' => $isValid,
                 'hold_id' => $holdId
             ];
             
         } elseif ($action === 'DEBIT' || $action === 'DEBIT_HOLD' || $action === 'DEBIT_FUNDS') {
-            // Debit the held amount from the account
-            // Find the hold record
             $stmt = $pdo->prepare("
                 SELECT id, account_id, amount, status
                 FROM financial_holds
@@ -394,24 +352,19 @@ try {
             $hold = $stmt->fetch(PDO::FETCH_ASSOC);
 
             if (!$hold) {
-                throw new Exception("No active hold found for reference: $holdReference");
+                throw new Exception("No active hold found");
             }
 
-            // Check if hold amount matches debit amount
             if (floatval($hold['amount']) !== $amount) {
-                throw new Exception("Hold amount mismatch. Hold: {$hold['amount']}, Requested: $amount");
+                throw new Exception("Hold amount mismatch");
             }
 
-            // Deduct from account - reduce balance AND held_amount
             $stmt = $pdo->prepare("
                 UPDATE accounts 
-                SET 
-                    balance = balance - :amount,
-                    held_amount = held_amount - :amount,
-                    updated_at = NOW()
+                SET balance = balance - :amount,
+                    held_amount = held_amount - :amount
                 WHERE account_id = :account_id 
-                AND balance >= :amount
-                AND held_amount >= :amount
+                AND balance >= :amount AND held_amount >= :amount
                 RETURNING balance, available_balance, held_amount
             ");
             $stmt->execute([
@@ -421,39 +374,28 @@ try {
             $updated = $stmt->fetch(PDO::FETCH_ASSOC);
 
             if (!$updated) {
-                throw new Exception("Insufficient balance or held amount for debit");
+                throw new Exception("Insufficient balance for debit");
             }
 
-            // Mark hold as DEBITED
             $stmt = $pdo->prepare("
-                UPDATE financial_holds 
-                SET status = 'DEBITED',
-                    debited_at = NOW(),
-                    updated_at = NOW()
+                UPDATE financial_holds SET status = 'DEBITED', debited_at = NOW()
                 WHERE id = :hold_id
             ");
             $stmt->execute(['hold_id' => $hold['id']]);
 
             $responsePayload = [
                 'status' => 'SUCCESS',
-                'hold_placed' => false,
                 'debited' => true,
-                'message' => 'Funds debited from account',
                 'hold_reference' => $holdReference,
                 'asset_type' => 'ACCOUNT',
                 'asset_id' => $account['account_id'],
-                'account_number' => $accountNumber,
                 'amount' => $amount,
                 'total_balance' => floatval($updated['balance']),
                 'available_balance' => floatval($updated['available_balance']),
-                'held_amount' => floatval($updated['held_amount']),
-                'currency' => $account['currency'] ?? 'BWP',
-                'requester' => $requester,
-                'signature_verified' => $isValid
+                'held_amount' => floatval($updated['held_amount'])
             ];
             
         } elseif (in_array($action, ['RELEASE', 'RELEASE_HOLD', 'UNHOLD'])) {
-            // Release hold - return funds to available_balance
             $stmt = $pdo->prepare("
                 SELECT id, account_id, amount, status
                 FROM financial_holds
@@ -470,16 +412,13 @@ try {
             $hold = $stmt->fetch(PDO::FETCH_ASSOC);
 
             if (!$hold) {
-                throw new Exception("No active hold found for reference: $holdReference");
+                throw new Exception("No active hold found");
             }
 
-            // Return the amount to available_balance and reduce held_amount
             $stmt = $pdo->prepare("
                 UPDATE accounts 
-                SET 
-                    available_balance = available_balance + :amount,
-                    held_amount = held_amount - :amount,
-                    updated_at = NOW()
+                SET available_balance = available_balance + :amount,
+                    held_amount = held_amount - :amount
                 WHERE account_id = :account_id 
                 AND held_amount >= :amount
                 RETURNING balance, available_balance, held_amount
@@ -491,55 +430,43 @@ try {
             $updated = $stmt->fetch(PDO::FETCH_ASSOC);
 
             if (!$updated) {
-                throw new Exception("Failed to release hold - held_amount mismatch");
+                throw new Exception("Failed to release hold");
             }
 
-            // Mark hold as RELEASED
             $stmt = $pdo->prepare("
                 UPDATE financial_holds 
-                SET status = 'RELEASED',
-                    released_by = :requester,
-                    released_at = NOW(),
-                    updated_at = NOW()
+                SET status = 'RELEASED', released_at = NOW()
                 WHERE id = :hold_id
             ");
-            $stmt->execute([
-                'hold_id' => $hold['id'],
-                'requester' => $requester
-            ]);
+            $stmt->execute(['hold_id' => $hold['id']]);
 
             $responsePayload = [
                 'status' => 'SUCCESS',
                 'hold_placed' => false,
-                'message' => 'Hold released - funds returned to available balance',
+                'message' => 'Hold released',
                 'hold_reference' => $holdReference,
                 'asset_type' => 'ACCOUNT',
                 'asset_id' => $account['account_id'],
-                'account_number' => $accountNumber,
                 'amount' => floatval($hold['amount']),
                 'total_balance' => floatval($updated['balance']),
                 'available_balance' => floatval($updated['available_balance']),
-                'held_amount' => floatval($updated['held_amount']),
-                'requester' => $requester,
-                'signature_verified' => $isValid
+                'held_amount' => floatval($updated['held_amount'])
             ];
             
         } else {
             throw new Exception("Unsupported action: $action");
         }
 
+    // ============================================================
+    // WALLET HANDLING
+    // ============================================================
     } elseif ($assetType === 'WALLET' || $assetType === 'E-WALLET' || $assetType === 'EWALLET') {
-        // ============================================================
-        // WALLET HANDLING
-        // ============================================================
         if (!$phone) {
             throw new Exception("Phone number required for wallet hold");
         }
 
-        // Normalize phone
         $normalizedPhone = ltrim($phone, '+');
 
-        // Find wallet via users table
         $stmt = $pdo->prepare("
             SELECT w.wallet_id, w.balance, w.status, w.currency, u.user_id
             FROM instant_money_wallets w
@@ -560,7 +487,6 @@ try {
         }
 
         if (in_array($action, ['HOLD', 'PLACE', 'PLACE_HOLD'])) {
-            // Ensure financial_holds table exists
             $pdo->exec("
                 CREATE TABLE IF NOT EXISTS financial_holds (
                     id BIGSERIAL PRIMARY KEY,
@@ -576,19 +502,16 @@ try {
                     created_at TIMESTAMP DEFAULT NOW(),
                     updated_at TIMESTAMP DEFAULT NOW()
                 )
-            ");
+            });
 
-            // Check sufficient balance
             if ($wallet['balance'] < $amount) {
                 throw new Exception("Insufficient funds in wallet");
             }
 
-            // Create hold record
             $stmt = $pdo->prepare("
                 INSERT INTO financial_holds 
                     (wallet_id, amount, hold_reference, status, requester, signature_verified, expires_at)
-                VALUES 
-                    (?, ?, ?, 'HELD', ?, ?, NOW() + INTERVAL '24 hours')
+                VALUES (?, ?, ?, 'HELD', ?, ?, NOW() + INTERVAL '24 hours')
                 RETURNING id
             ");
             $stmt->execute([$wallet['wallet_id'], $amount, $holdReference, $requester, $isValid ? 1 : 0]);
@@ -606,8 +529,6 @@ try {
                 'phone' => $phone,
                 'amount' => $amount,
                 'currency' => $wallet['currency'] ?? 'BWP',
-                'requester' => $requester,
-                'signature_verified' => $isValid,
                 'hold_id' => $holdId
             ];
             
@@ -615,9 +536,7 @@ try {
             $stmt = $pdo->prepare("
                 UPDATE financial_holds 
                 SET status = 'RELEASED', 
-                    released_by = :requester,
-                    released_at = NOW(),
-                    updated_at = NOW()
+                    released_at = NOW()
                 WHERE hold_reference = :hold_reference 
                 AND status = 'HELD'
                 AND wallet_id = :wallet_id
@@ -625,13 +544,12 @@ try {
             ");
             $stmt->execute([
                 'hold_reference' => $holdReference,
-                'wallet_id' => $wallet['wallet_id'],
-                'requester' => $requester
+                'wallet_id' => $wallet['wallet_id']
             ]);
             $released = $stmt->fetch(PDO::FETCH_ASSOC);
             
             if (!$released) {
-                throw new Exception("No active hold found for reference: $holdReference");
+                throw new Exception("No active hold found");
             }
             
             $assetId = $released['wallet_id'] ?? null;
@@ -643,9 +561,7 @@ try {
                 'hold_reference' => $holdReference,
                 'asset_type' => 'WALLET',
                 'asset_id' => $assetId,
-                'phone' => $phone,
-                'requester' => $requester,
-                'signature_verified' => $isValid
+                'phone' => $phone
             ];
             
         } else {
@@ -660,19 +576,11 @@ try {
     
     error_log("ZURUBANK HOLD: Hold processed successfully - Ref: {$holdReference}, AssetType: {$assetType}");
     
-    // ============================================================
-    // SEND SIGNED RESPONSE WITH CERTIFICATE
-    // ============================================================
-    
-    // Add missing fields if needed
-    if ($assetId && !isset($responsePayload['asset_id'])) {
-        $responsePayload['asset_id'] = $assetId;
-    }
-    
     $responsePayload['verification_method'] = 'certificate';
     $responsePayload['timestamp'] = time();
+    $responsePayload['requester'] = $requester;
+    $responsePayload['signature_verified'] = $isValid;
     
-    // Send signed response (adds signature and timestamp automatically)
     send_signed_response($responsePayload);
 
 } catch (Exception $e) {
@@ -681,7 +589,6 @@ try {
     }
     error_log("ZURUBANK hold.php ERROR: " . $e->getMessage());
     error_log("ZURUBANK hold.php Trace: " . $e->getTraceAsString());
-    error_log("ZURUBANK hold.php Input: " . json_encode($input ?? []));
     
     http_response_code(200);
     echo json_encode([
