@@ -1,3 +1,4 @@
+<?php
 /**
  * /Backend/api/v1/verify_asset_zurubank.php
  * UPDATED - With better voucher detection
