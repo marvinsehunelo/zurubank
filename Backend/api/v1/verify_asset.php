@@ -1,7 +1,6 @@
-<?php
 /**
- * verify_asset_zurubank.php
- * Asset Verification for Zurubank - VOUCHER, CASHOUT-VOUCHER, and ACCOUNT
+ * /Backend/api/v1/verify_asset_zurubank.php
+ * UPDATED - With better voucher detection
  */
 
 require_once __DIR__ . '/../../config/db.php';
@@ -39,13 +38,27 @@ $assetType = strtoupper(
     ''
 );
 
+// ============================================================
+// FIX: Check for voucher_number in MULTIPLE locations
+// The CertificateManager may be moving it
+// ============================================================
 $voucherNumber = $input['voucher_number'] ?? 
                  $input['voucher'] ?? 
+                 $input['voucherNumber'] ?? 
+                 $input['voucher_no'] ?? 
+                 $input['voucherId'] ?? 
                  $input['source']['voucher']['voucher_number'] ?? 
                  $input['source']['voucher_number'] ??
+                 $input['source']['voucherNumber'] ??
+                 $input['source']['voucher'] ??
+                 // Also check if it's been renamed in the certificate payload
+                 $input['certificate_data']['voucher_number'] ??
+                 $input['certificate_data']['voucher'] ??
                  null;
 
 $voucherPin = $input['voucher_pin'] ?? 
+              $input['voucherPin'] ?? 
+              $input['voucherPIN'] ?? 
               $input['pin'] ?? 
               $input['source']['voucher']['voucher_pin'] ??
               $input['source']['pin'] ??
@@ -65,6 +78,18 @@ $claimantPhone = $input['claimant_phone'] ??
 
 $amount = floatval($input['amount'] ?? $input['value'] ?? 0);
 $reference = $input['reference'] ?? $input['transaction_reference'] ?? null;
+
+// ============================================================
+// FIX: If asset_type is VOUCHER but voucher_number is missing,
+// check if source_identifier is actually the voucher number
+// ============================================================
+if (($assetType === 'VOUCHER' || $assetType === 'CASHOUT-VOUCHER') && empty($voucherNumber)) {
+    // The source_identifier might actually be the voucher number
+    if (!empty($accountNumber) && preg_match('/^\d{12,15}$/', $accountNumber)) {
+        $voucherNumber = $accountNumber;
+        error_log("Using source_identifier as voucher_number: $voucherNumber");
+    }
+}
 
 error_log("Normalized - Type: $assetType, Voucher: $voucherNumber, Account: $accountNumber, Phone: $claimantPhone, Amount: $amount");
 
@@ -169,7 +194,9 @@ try {
     // HANDLE VOUCHER AND CASHOUT-VOUCHER TYPE
     // ============================================================
     if (empty($voucherNumber)) {
-        throw new Exception("Voucher number required");
+        // Log all fields to debug
+        error_log("Voucher number missing. Available fields: " . implode(', ', array_keys($input)));
+        throw new Exception("Voucher number required. Available fields: " . implode(', ', array_keys($input)));
     }
 
     $pdo->beginTransaction();
@@ -204,6 +231,7 @@ try {
     $voucher = $stmt->fetch(PDO::FETCH_ASSOC);
 
     if (!$voucher) {
+        // Try with trim
         $stmt = $pdo->prepare("
             SELECT * FROM instant_money_vouchers
             WHERE TRIM(voucher_number) = TRIM(:voucher_number)
@@ -307,7 +335,8 @@ try {
         "debug" => [
             "asset_type" => $assetType,
             "voucher_number" => $voucherNumber,
-            "account_number" => $accountNumber
+            "account_number" => $accountNumber,
+            "all_fields" => array_keys($input)
         ]
     ]);
 }
