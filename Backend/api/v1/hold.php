@@ -4,6 +4,7 @@
  * Unified hold endpoint for Zurubank
  * Handles VOUCHER, ACCOUNT, and WALLET holds
  * UPDATED: Certificate-based verification (Visa/Mastercard model)
+ * UPDATED: Same voucher number detection as verify_asset.php
  */
 
 require_once __DIR__ . '/../../config/db.php';
@@ -24,6 +25,7 @@ try {
     
     if (!isset($input['certificate'])) {
         error_log("ZURUBANK HOLD: No certificate provided");
+        http_response_code(200);
         echo json_encode([
             'status' => 'ERROR',
             'hold_placed' => false,
@@ -42,6 +44,7 @@ try {
     
     if (!$isValid) {
         error_log("ZURUBANK HOLD: Certificate verification failed");
+        http_response_code(200);
         echo json_encode([
             'status' => 'ERROR',
             'hold_placed' => false,
@@ -62,10 +65,39 @@ try {
     // Get asset type
     $assetType = strtoupper($input['asset_type'] ?? $input['type'] ?? '');
     
-    // Extract identifiers based on asset type
-    $voucherNumber = $input['voucher_number'] ?? $input['voucher'] ?? null;
+    // ============================================================
+    // FIX: Extract voucher_number from MULTIPLE locations
+    // Same logic as verify_asset.php
+    // ============================================================
+    $voucherNumber = $input['voucher_number'] ?? 
+                     $input['voucher'] ?? 
+                     $input['voucherNumber'] ?? 
+                     $input['voucher_no'] ?? 
+                     $input['voucherId'] ?? 
+                     $input['source']['voucher']['voucher_number'] ?? 
+                     $input['source']['voucher_number'] ??
+                     $input['source']['voucherNumber'] ??
+                     $input['source']['voucher'] ??
+                     $input['certificate_data']['voucher_number'] ??
+                     $input['certificate_data']['voucher'] ??
+                     null;
+    
+    // Get other identifiers
     $accountNumber = $input['account_number'] ?? $input['account'] ?? $input['source_identifier'] ?? null;
     $phone = $input['phone'] ?? $input['wallet_phone'] ?? $input['ewallet_phone'] ?? null;
+    
+    // ============================================================
+    // FIX: If asset_type is VOUCHER but voucher_number is missing,
+    // check if source_identifier is actually the voucher number
+    // Same logic as verify_asset.php
+    // ============================================================
+    if (($assetType === 'VOUCHER' || $assetType === 'CASHOUT-VOUCHER') && empty($voucherNumber)) {
+        // The source_identifier might actually be the voucher number
+        if (!empty($accountNumber) && preg_match('/^\d{12,15}$/', $accountNumber)) {
+            $voucherNumber = $accountNumber;
+            error_log("Using source_identifier as voucher_number: $voucherNumber");
+        }
+    }
     
     $amount = floatval($input['amount'] ?? $input['value'] ?? 0);
     
@@ -102,13 +134,18 @@ try {
 
     // Process based on asset type and action
     if ($assetType === 'VOUCHER') {
+        // ============================================================
+        // VOUCHER HANDLING
+        // ============================================================
         if (!$voucherNumber) {
-            throw new Exception("Voucher number required");
+            // Log all fields for debugging
+            error_log("Voucher number missing. Available fields: " . implode(', ', array_keys($input)));
+            throw new Exception("Voucher number required. Available fields: " . implode(', ', array_keys($input)));
         }
 
         // Lock the voucher row for update
         $stmt = $pdo->prepare("
-            SELECT voucher_id, amount, status, recipient_phone, currency
+            SELECT voucher_id, amount, status, recipient_phone, currency, voucher_pin
             FROM instant_money_vouchers
             WHERE voucher_number = :voucher_number
             LIMIT 1
@@ -118,7 +155,18 @@ try {
         $voucher = $stmt->fetch(PDO::FETCH_ASSOC);
 
         if (!$voucher) {
-            throw new Exception("Voucher not found");
+            // Try with trim
+            $stmt = $pdo->prepare("
+                SELECT * FROM instant_money_vouchers
+                WHERE TRIM(voucher_number) = TRIM(:voucher_number)
+                LIMIT 1
+            ");
+            $stmt->execute(['voucher_number' => $voucherNumber]);
+            $voucher = $stmt->fetch(PDO::FETCH_ASSOC);
+        }
+
+        if (!$voucher) {
+            throw new Exception("Voucher not found: $voucherNumber");
         }
 
         if (in_array($action, ['HOLD', 'PLACE', 'PLACE_HOLD'])) {
@@ -160,7 +208,8 @@ try {
                 'amount' => floatval($voucher['amount']),
                 'currency' => $voucher['currency'] ?? 'BWP',
                 'requester' => $requester,
-                'signature_verified' => $isValid
+                'signature_verified' => $isValid,
+                'recipient_phone' => $voucher['recipient_phone']
             ];
             
         } elseif (in_array($action, ['RELEASE', 'RELEASE_HOLD', 'UNHOLD'])) {
@@ -202,10 +251,13 @@ try {
             ];
             
         } else {
-            throw new Exception("Unsupported action: $action");
+            throw new Exception("Unsupported action for voucher: $action");
         }
 
     } elseif ($assetType === 'ACCOUNT') {
+        // ============================================================
+        // ACCOUNT HANDLING (unchanged)
+        // ============================================================
         if (!$accountNumber) {
             throw new Exception("Account number required");
         }
@@ -243,6 +295,7 @@ try {
                 CREATE TABLE IF NOT EXISTS financial_holds (
                     id BIGSERIAL PRIMARY KEY,
                     account_id BIGINT,
+                    wallet_id BIGINT,
                     amount DECIMAL(20,4) NOT NULL,
                     hold_reference VARCHAR(100) UNIQUE NOT NULL,
                     status VARCHAR(30) DEFAULT 'HELD',
@@ -483,6 +536,9 @@ try {
         }
 
     } elseif ($assetType === 'WALLET' || $assetType === 'E-WALLET' || $assetType === 'EWALLET') {
+        // ============================================================
+        // WALLET HANDLING (unchanged)
+        // ============================================================
         if (!$phone) {
             throw new Exception("Phone number required for wallet hold");
         }
@@ -634,11 +690,18 @@ try {
     error_log("ZURUBANK hold.php Trace: " . $e->getTraceAsString());
     error_log("ZURUBANK hold.php Input: " . json_encode($input ?? []));
     
-    http_response_code(400);
+    http_response_code(200);
     echo json_encode([
         'status' => 'ERROR',
         'hold_placed' => false,
         'message' => $e->getMessage(),
-        'timestamp' => time()
+        'timestamp' => time(),
+        'debug' => [
+            'asset_type' => $assetType ?? 'unknown',
+            'voucher_number' => $voucherNumber ?? null,
+            'account_number' => $accountNumber ?? null,
+            'phone' => $phone ?? null,
+            'hold_reference' => $holdReference ?? null
+        ]
     ]);
 }
