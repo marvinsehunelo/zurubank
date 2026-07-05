@@ -7,6 +7,7 @@
  * FIXED: Only uses columns that exist in instant_money_vouchers table
  * Available columns: status, source_hold_reference, reference
  * NOT available: updated_at, hold_expires_at, held_by, hold_signature_verified
+ * FIXED: Syntax error in financial_holds CREATE TABLE statement (}); → ");
  */
 
 require_once __DIR__ . '/../../config/db.php';
@@ -106,10 +107,15 @@ try {
     }
     
     if (empty($assetType)) {
-        if ($voucherNumber) $assetType = 'VOUCHER';
-        elseif ($accountNumber) $assetType = 'ACCOUNT';
-        elseif ($phone) $assetType = 'WALLET';
-        else throw new Exception("Could not determine asset type");
+        if ($voucherNumber) {
+            $assetType = 'VOUCHER';
+        } elseif ($accountNumber) {
+            $assetType = 'ACCOUNT';
+        } elseif ($phone) {
+            $assetType = 'WALLET';
+        } else {
+            throw new Exception("Could not determine asset type");
+        }
     }
     
     error_log("ZURUBANK HOLD: Action: $action, AssetType: $assetType, HoldRef: $holdReference, Amount: $amount");
@@ -240,8 +246,14 @@ try {
 
         $stmt = $pdo->prepare("
             SELECT 
-                account_id, account_number, balance, available_balance, held_amount,
-                status, currency, user_id
+                account_id,
+                account_number,
+                balance,
+                available_balance,
+                held_amount,
+                status,
+                currency,
+                user_id
             FROM accounts
             WHERE account_number = :account_number
             LIMIT 1
@@ -458,7 +470,7 @@ try {
         }
 
     // ============================================================
-    // WALLET HANDLING
+    // WALLET HANDLING - FIXED: Syntax error in CREATE TABLE statement
     // ============================================================
     } elseif ($assetType === 'WALLET' || $assetType === 'E-WALLET' || $assetType === 'EWALLET') {
         if (!$phone) {
@@ -487,6 +499,7 @@ try {
         }
 
         if (in_array($action, ['HOLD', 'PLACE', 'PLACE_HOLD'])) {
+            // ✅ FIXED: Changed }); to ");
             $pdo->exec("
                 CREATE TABLE IF NOT EXISTS financial_holds (
                     id BIGSERIAL PRIMARY KEY,
@@ -502,7 +515,7 @@ try {
                     created_at TIMESTAMP DEFAULT NOW(),
                     updated_at TIMESTAMP DEFAULT NOW()
                 )
-            });
+            ");
 
             if ($wallet['balance'] < $amount) {
                 throw new Exception("Insufficient funds in wallet");
