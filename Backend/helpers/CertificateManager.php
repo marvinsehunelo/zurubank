@@ -196,9 +196,7 @@ class CertificateManager
         if ($result === -1) {
             error_log("CertificateManager: OpenSSL error: " . openssl_error_string());
         }
-        
-        openssl_free_key($keyResource);
-        
+                
         return [
             'verified' => $isValid,
             'requester' => $requester,
@@ -266,9 +264,7 @@ public function createSignedRequest(array $payload, string $requester): array
         
         error_log("Emergency repair - New key length: " . strlen($repairedKey));
         error_log("Emergency repair - Key preview: " . substr($repairedKey, 0, 100));
-        
-        $keyResource = openssl_pkey_get_private($repairedKey);
-        
+                
         if ($keyResource) {
             // Save the repaired key for future use
             $this->myPrivateKey = $repairedKey;
