@@ -473,26 +473,77 @@ function loadVouchers(){
             return; 
         }
         if(!res.vouchers.length){ 
-            c.innerHTML='<div class="text-gray-500 py-2 text-xs">No active vouchers.</div>'; 
+            c.innerHTML='<div class="text-gray-500 py-2 text-xs">No vouchers found.</div>'; 
             return; 
         }
         
-        c.innerHTML='<table class="min-w-full text-xs border border-gray-200"><thead><tr class="bg-gray-100 text-gray-700 font-semibold"><th class="border px-3 py-1.5 text-left">Code</th><th class="border px-3 py-1.5 text-left">Phone</th><th class="border px-3 py-1.5 text-left">Amt</th><th class="border px-3 py-1.5 text-left">Swap</th><th class="border px-3 py-1.5 text-left">Swap Paid By</th><th class="border px-3 py-1.5 text-left">Status</th><th class="border px-3 py-1.5 text-left">Action</th></tr></thead><tbody>'
-          + res.vouchers.map(v=>`
-            <tr class="hover:bg-gray-50">
-              <td class="border px-3 py-1.5 text-gray-800 font-medium">${v.voucher_number}</td>
-              <td class="border px-3 py-1.5">${v.recipient_phone ?? 'N/A'}</td>
-              <td class="border px-3 py-1.5 font-bold">P${v.amount}</td>
-              <td class="border px-3 py-1.5">${v.swap_enabled ? 'Yes' : 'No'}</td>
-              <td class="border px-3 py-1.5">${v.swap_fee_paid_by ?? '—'}</td>
-              <td class="border px-3 py-1.5"><span class="font-bold ${v.status==='active'?'text-success':'text-gray-500'}">${v.status}</span></td>
-              <td class="border px-3 py-1.5">${v.status==='active'?`<button onclick="reverseVoucher('${v.voucher_number}')" class='text-danger underline hover:text-red-800 font-medium'>Reverse</button>`:'—'}</td>
-            </tr>`).join('')
-          +'</tbody></table>';
+        c.innerHTML=`
+            <div class="overflow-x-auto">
+                <table class="min-w-full text-xs border border-gray-200">
+                    <thead>
+                        <tr class="bg-gray-100 text-gray-700 font-semibold">
+                            <th class="border px-3 py-1.5 text-left">#</th>
+                            <th class="border px-3 py-1.5 text-left">Voucher Number</th>
+                            <th class="border px-3 py-1.5 text-left">PIN</th>
+                            <th class="border px-3 py-1.5 text-left">Amount</th>
+                            <th class="border px-3 py-1.5 text-left">Recipient</th>
+                            <th class="border px-3 py-1.5 text-left">Status</th>
+                            <th class="border px-3 py-1.5 text-left">Created</th>
+                            <th class="border px-3 py-1.5 text-left">Expires</th>
+                            <th class="border px-3 py-1.5 text-left">SAT Expires</th>
+                            <th class="border px-3 py-1.5 text-left">Swap</th>
+                            <th class="border px-3 py-1.5 text-left">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${res.vouchers.map((v, index) => `
+                            <tr class="hover:bg-gray-50">
+                                <td class="border px-3 py-1.5 text-center">${index + 1}</td>
+                                <td class="border px-3 py-1.5 font-mono font-bold text-primary">${v.voucher_number}</td>
+                                <td class="border px-3 py-1.5 font-mono text-gray-800">${v.voucher_pin}</td>
+                                <td class="border px-3 py-1.5 font-bold">${v.currency || 'BWP'} ${parseFloat(v.amount).toFixed(2)}</td>
+                                <td class="border px-3 py-1.5">${v.recipient_phone ?? 'N/A'}</td>
+                                <td class="border px-3 py-1.5">
+                                    <span class="font-bold ${v.status === 'active' ? 'text-success' : v.status === 'reversed' ? 'text-danger' : 'text-gray-500'}">
+                                        ${v.status}
+                                    </span>
+                                </td>
+                                <td class="border px-3 py-1.5 text-gray-600">${formatDate(v.voucher_created_at)}</td>
+                                <td class="border px-3 py-1.5 text-gray-600">${formatDate(v.voucher_expires_at)}</td>
+                                <td class="border px-3 py-1.5 text-gray-600">${formatDate(v.sat_expires_at)}</td>
+                                <td class="border px-3 py-1.5">${v.swap_enabled ? '✅ Yes' : '❌ No'}</td>
+                                <td class="border px-3 py-1.5">
+                                    ${v.status === 'active' ? 
+                                        `<button onclick="reverseVoucher('${v.voucher_number}')" class="text-danger underline hover:text-red-800 font-medium">Reverse</button>` : 
+                                        '<span class="text-gray-400">—</span>'
+                                    }
+                                </td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            </div>
+        `;
     })
     .catch(()=>c.innerHTML='<div class="text-red-500 py-2 text-xs">Error loading vouchers (Network failure).</div>');
 }
 
+// Helper function to format dates
+function formatDate(dateString) {
+    if (!dateString) return 'N/A';
+    try {
+        const date = new Date(dateString);
+        return date.toLocaleString('en-GB', {
+            day: '2-digit',
+            month: 'short',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit'
+        });
+    } catch (e) {
+        return dateString;
+    }
+}
 // ----------------- REVERSE VOUCHER -----------------
 function reverseVoucher(code) {
     if (!confirm(`Are you sure you want to reverse voucher ${code}? Funds will be credited back to your account.`)) return;
