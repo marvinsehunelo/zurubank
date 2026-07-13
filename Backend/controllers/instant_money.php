@@ -1,6 +1,4 @@
 <?php
-// Backend/controllers/instant_money.php
-
 if (session_status() === PHP_SESSION_NONE) session_start();
 header('Content-Type: application/json');
 
@@ -44,7 +42,6 @@ try {
             $from_account_id = $_POST['from_account_id'] ?? null;
             $recipient_phone = trim($_POST['recipient_phone'] ?? '');
             $amount = floatval($_POST['amount'] ?? 0);
-            $swap_option = $_POST['swap_option'] ?? 'none';
 
             if (!$from_account_id || !$recipient_phone || $amount <= 0) {
                 throw new Exception("Invalid input data");
@@ -76,28 +73,14 @@ try {
 
             $voucher_pin = str_pad(mt_rand(0, 999999), 6, '0', STR_PAD_LEFT);
 
-            // Determine swap fee paid by
-            $swap_fee_paid_by = ($swap_option === 'sender') ? 'sender' : 'recipient';
-
-            // Insert voucher
+            // Insert voucher - REMOVED swap_fee_paid_by
             $stmt = $pdo->prepare("
                 INSERT INTO instant_money_vouchers
                 (voucher_number, voucher_pin, amount, currency, status, created_by, recipient_phone, redeemed_by, 
-                 voucher_created_at, voucher_expires_at, sat_purchased, swap_made_at, sat_expires_at, sat_fee_paid_by,
-                 swap_fee_paid_by, swap_enabled)
-                VALUES (?, ?, ?, ?, 'active', ?, ?, NULL, NOW(), NOW() + INTERVAL '7 days', ?, NOW(), NOW() + INTERVAL '1 day', 'sender', ?, ?)
+                 voucher_created_at, voucher_expires_at, sat_purchased, swap_made_at, sat_expires_at, sat_fee_paid_by)
+                VALUES (?, ?, ?, ?, 'active', ?, ?, NULL, NOW(), NOW() + INTERVAL '7 days', TRUE, NOW(), NOW() + INTERVAL '1 day', 'sender')
             ");
-            $stmt->execute([
-                $voucher_number, 
-                $voucher_pin, 
-                $amount, 
-                $currency, 
-                $user_id, 
-                $recipient_phone,
-                ($swap_option !== 'none') ? 1 : 0,
-                $swap_fee_paid_by,
-                ($swap_option !== 'none') ? 1 : 0
-            ]);
+            $stmt->execute([$voucher_number, $voucher_pin, $amount, $currency, $user_id, $recipient_phone]);
             $voucher_id = $pdo->lastInsertId();
 
             // Fetch ledger accounts
@@ -143,13 +126,15 @@ try {
             jsonResponse(true, "Voucher created successfully", [
                 'voucher_number' => $voucher_number,
                 'voucher_pin' => $voucher_pin,
-                'amount' => $amount,
-                'recipient_phone' => $recipient_phone
+                'amount' => $amount
             ]);
             break;
 
         // ---------------- LIST VOUCHERS ----------------
         case 'list_vouchers':
+            // ============================================================
+            // FIX: Removed swap_fee_paid_by - column doesn't exist
+            // ============================================================
             $stmt = $pdo->prepare("
                 SELECT 
                     voucher_id,
@@ -171,11 +156,11 @@ try {
                     holding_account,
                     origin,
                     external_reference,
+                    source_institution,
+                    source_hold_reference,
                     reference,
                     source_asset_type,
-                    code_hash,
-                    swap_fee_paid_by,
-                    swap_enabled
+                    code_hash
                 FROM instant_money_vouchers
                 WHERE created_by = :user_id
                 ORDER BY voucher_created_at DESC
