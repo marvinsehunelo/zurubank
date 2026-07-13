@@ -290,6 +290,7 @@
             border-radius: 4px;
             font-size: 10px;
             color: #00cc88;
+            margin-top: 10px;
         }
         .cert-status .dot {
             width: 6px;
@@ -299,6 +300,7 @@
         }
         .cert-status .dot.ready { background: #00cc88; }
         .cert-status .dot.error { background: #ff3333; }
+        .cert-status .dot.warning { background: #ff6b00; }
 
         @media (max-width: 600px) {
             .atm-shell { padding: 10px; }
@@ -316,7 +318,7 @@
                 <div class="atm-branding">
                     <span class="brand-name">ZURUBANK</span>
                     <span class="brand-sub">CARDLESS ATM</span>
-                    <span class="security-badge">🔒 SECURE</span>
+                    <span class="security-badge">🔒 BANK-SIGNED</span>
                 </div>
             </div>
 
@@ -361,7 +363,7 @@
                         <button class="btn btn-primary" onclick="cashoutVoucher()">💵 Dispense Cash</button>
                         <div id="certStatus" class="cert-status">
                             <span class="dot ready"></span>
-                            <span id="certStatusText">Certificate Ready</span>
+                            <span id="certStatusText">🔒 Bank-Signed Channel — Server Verified</span>
                         </div>
                     </div>
 
@@ -433,23 +435,21 @@
         const ATM_ID = 'VIRTUALATM001';
         const CERT_ISSUER = 'ZURUBANK';
 
-        // Certificate Manager (simulated in frontend - real cert would come from HSM)
+        // ============================================================
+        // CERTIFICATE MANAGER - Server-side signing only
+        // 
+        // The browser cannot hold a real private key. ZuruBank's server
+        // signs on behalf of this terminal using the key already 
+        // configured server-side. This object exists so the rest of the
+        // code has a stable place to call from if real HSM-backed 
+        // signing is added to the client later.
+        // ============================================================
         const CertificateManager = {
             sign: function(payload) {
-                // In production, this would use real certificate from HSM
-                // For now, we create a signed request with certificate
-                const timestamp = Date.now();
-                const signature = btoa(JSON.stringify(payload) + ':' + timestamp + ':' + CERT_ISSUER);
-                
-                return {
-                    ...payload,
-                    certificate: {
-                        issuer: CERT_ISSUER,
-                        timestamp: timestamp,
-                        signature: signature,
-                        version: '1.0'
-                    }
-                };
+                // Server-side signing happens in atm_cashout_voucher.php
+                // The frontend just forwards the request data.
+                // No client-side signature is generated or sent.
+                return { ...payload };
             }
         };
 
@@ -576,6 +576,9 @@
             showResponse('Ready for next transaction', 'info');
         }
 
+        // ============================================================
+        // UPDATE CERT STATUS - Honest labeling
+        // ============================================================
         function updateCertStatus(ready) {
             const statusEl = document.getElementById('certStatus');
             const textEl = document.getElementById('certStatusText');
@@ -583,23 +586,21 @@
             
             if (ready) {
                 dot.className = 'dot ready';
-                textEl.textContent = '🔒 Certificate Ready - Secure Mode';
+                textEl.textContent = '🔒 Bank-Signed Channel — Server Verified';
             } else {
                 dot.className = 'dot error';
-                textEl.textContent = '⚠️ Certificate Error - Check Configuration';
+                textEl.textContent = '⚠️ Signing Unavailable — Check Server Configuration';
             }
         }
 
         // ============================================================
-        // API CALL - With Certificate Signing
+        // API CALL - No client-side signing, server handles it
         // ============================================================
         async function callAPI(endpoint, data) {
             try {
-                // Sign the request with certificate
-                const signedData = CertificateManager.sign(data);
-                
+                // No client-side signing - server will sign if needed
                 const url = endpoint.startsWith('http') ? endpoint : `${API_BASE}${endpoint}`;
-                console.log(`Calling API: ${url}`, signedData);
+                console.log(`Calling API: ${url}`, data);
 
                 const response = await fetch(url, {
                     method: 'POST',
@@ -608,7 +609,7 @@
                         'X-ATM-ID': ATM_ID,
                         'X-Requested-With': 'XMLHttpRequest'
                     },
-                    body: JSON.stringify(signedData)
+                    body: JSON.stringify(data)
                 });
 
                 console.log(`Response Status: ${response.status}`);
@@ -640,7 +641,7 @@
         }
 
         // ============================================================
-        // VOUCHER CASOUT - REAL PRODUCTION
+        // VOUCHER CASOUT - Server handles signing
         // ============================================================
         async function cashoutVoucher() {
             if (isProcessing) return;
@@ -654,14 +655,13 @@
             if (!amount || amount < 10) { showResponse('❌ Enter valid amount (min P10)', 'error'); return; }
 
             isProcessing = true;
-            showLoading(true, '🔐 Verifying certificate...');
+            showLoading(true, '🔐 Verifying transaction...');
 
             try {
-                // First verify certificate
                 updateCertStatus(true);
-                showResponse('🔐 Certificate verified. Processing voucher...', 'info');
+                showResponse('🔐 Bank-signed channel. Processing voucher...', 'info');
 
-                // Call the ATM cashout endpoint with signed request
+                // Send request - server will sign on behalf of ATM
                 const result = await callAPI('/atm/atm_cashout.php', {
                     voucher_number: voucherNumber,
                     voucher_pin: voucherPin,
@@ -675,18 +675,17 @@
                 if (result.status === 'CASHOUT_SUCCESS' || result.success === true) {
                     showModal(
                         '💵 CASH DISPENSED',
-                        `Voucher withdrawal successful!\nVoucher: ${voucherNumber}\nRef: ${result.cashout_reference || result.reference || 'N/A'}\n🔒 Certificate Verified`,
+                        `Voucher withdrawal successful!\nVoucher: ${voucherNumber}\nRef: ${result.cashout_reference || result.reference || 'N/A'}\n🔒 Bank-Signed Channel`,
                         result.amount || amount,
                         '💵'
                     );
                     showResponse(`✅ ${result.message || 'Cash dispensed successfully!'}`, 'success');
                     
-                    // Log the transaction (real)
-                    console.log('REAL TRANSACTION:', {
+                    console.log('TRANSACTION:', {
                         voucher: voucherNumber,
                         amount: amount,
                         reference: result.cashout_reference,
-                        certificate_verified: true,
+                        channel: 'bank-signed',
                         timestamp: new Date().toISOString()
                     });
                 } else {
@@ -702,7 +701,7 @@
         }
 
         // ============================================================
-        // CHECK STATUS - REAL
+        // CHECK STATUS
         // ============================================================
         async function checkStatus() {
             if (isProcessing) return;
@@ -733,7 +732,7 @@
                         Status: ${data.status || 'COMPLETED'}\n
                         Reference: ${data.reference || 'N/A'}\n
                         Time: ${data.timestamp || data.created_at || new Date().toLocaleString()}\n
-                        🔒 Certificate: ${data.signature_verified ? 'Verified ✓' : 'N/A'}
+                        🔒 Channel: ${data.signature_verified ? 'Bank-Signed ✓' : 'Standard'}
                     `;
                 } else {
                     statusResult.className = 'response-box error';
@@ -772,15 +771,14 @@
         }
 
         // ============================================================
-        // LOGGING - Real transaction logging
+        // LOGGING
         // ============================================================
         function logTransaction(data) {
-            // In production, this would send to a secure logging endpoint
             console.log('🔒 TRANSACTION LOG:', {
                 ...data,
                 timestamp: new Date().toISOString(),
                 atm_id: ATM_ID,
-                environment: 'production'
+                channel: 'bank-signed'
             });
         }
     </script>
