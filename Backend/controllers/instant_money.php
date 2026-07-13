@@ -132,9 +132,12 @@ try {
 
         // ---------------- LIST VOUCHERS ----------------
         case 'list_vouchers':
+            // ============================================================
+            // FIX: Changed swap_expires_at to sat_expires_at
+            // ============================================================
             $stmt = $pdo->prepare("
                 SELECT voucher_id, voucher_number, voucher_pin, amount, currency, status, created_by, recipient_phone,
-                       redeemed_by, voucher_created_at, voucher_expires_at, sat_purchased, sat_fee_paid_by, swap_expires_at
+                       redeemed_by, voucher_created_at, voucher_expires_at, sat_purchased, sat_fee_paid_by, sat_expires_at
                 FROM instant_money_vouchers
                 WHERE created_by=?
                 ORDER BY voucher_created_at DESC
@@ -193,5 +196,3 @@ try {
     error_log("Voucher API Error: " . $e->getMessage() . " on line " . $e->getLine());
     jsonResponse(false, "Transaction failed: " . $e->getMessage());
 }
-
-
