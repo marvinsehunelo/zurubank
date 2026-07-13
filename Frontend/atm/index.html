@@ -1,0 +1,728 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ZuruBank ATM - Cardless Cashout</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            background: linear-gradient(145deg, #0a0a2e 0%, #1a1a4e 100%);
+            font-family: 'Segoe UI', Arial, sans-serif;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .atm-container { perspective: 1000px; }
+
+        .atm-shell {
+            background: linear-gradient(135deg, #2a2a3a 0%, #1a1a2a 100%);
+            border-radius: 30px 30px 20px 20px;
+            padding: 20px 25px 15px 25px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.1), 0 0 0 2px #3a3a4a, 0 0 0 5px #1a1a1a;
+            max-width: 750px;
+            width: 100%;
+        }
+
+        .atm-top-bezel {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0 10px 15px 10px;
+            border-bottom: 2px solid #3a3a4a;
+            margin-bottom: 20px;
+        }
+
+        .atm-branding { text-align: center; }
+        .brand-name { font-size: 28px; font-weight: bold; letter-spacing: 3px; color: #ff6b00; text-shadow: 0 0 20px rgba(255,107,0,0.3); }
+        .brand-sub { font-size: 11px; color: #888; display: block; letter-spacing: 2px; }
+
+        .atm-screen {
+            background: linear-gradient(145deg, #0a2a3a, #062030);
+            width: 100%;
+            min-height: 450px;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: inset 0 0 30px rgba(0,0,0,0.6);
+            font-family: 'Courier New', monospace;
+        }
+
+        .screen-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #00cc88;
+            margin-bottom: 15px;
+        }
+        .bank-name { font-size: 14px; font-weight: bold; color: #00cc88; }
+        .status-dot { width: 8px; height: 8px; background: #00cc88; border-radius: 50%; display: inline-block; animation: blink 1s infinite; }
+        .screen-time { font-size: 14px; color: #00cc88; }
+
+        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+        .atm-screen-content { display: flex; flex-direction: column; gap: 12px; }
+
+        .row { display: flex; gap: 10px; flex-wrap: wrap; }
+        .row label { color: #88ff88; font-size: 11px; width: 100%; letter-spacing: 1px; }
+        .row input {
+            width: 100%;
+            background: #1a3a2f;
+            border: 1px solid #00cc88;
+            padding: 10px;
+            color: #fff;
+            font-size: 16px;
+            border-radius: 4px;
+        }
+        .row input:focus { outline: none; border-color: #ff6b00; box-shadow: 0 0 10px rgba(255,107,0,0.3); }
+
+        .quick-amounts { display: flex; gap: 10px; flex-wrap: wrap; }
+        .quick-amounts button {
+            background: #2a4a3a;
+            border: 1px solid #00cc88;
+            padding: 8px 15px;
+            color: #00cc88;
+            cursor: pointer;
+            font-size: 14px;
+            border-radius: 4px;
+            transition: all 0.2s;
+        }
+        .quick-amounts button:hover { background: #00cc88; color: #0a3d2f; }
+
+        .btn {
+            padding: 12px 20px;
+            border: none;
+            border-radius: 4px;
+            font-weight: bold;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s;
+            width: 100%;
+        }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        .btn-primary { background: #00cc88; color: #0a3d2f; }
+        .btn-primary:hover { background: #00bb77; }
+
+        .btn-secondary { background: #ff6b00; color: white; }
+        .btn-secondary:hover { background: #e85e00; }
+
+        .btn-danger { background: #cc3300; color: white; }
+        .btn-danger:hover { background: #aa2200; }
+
+        .btn-success { background: #2ecc71; color: white; }
+        .btn-success:hover { background: #27ae60; }
+
+        .response-box {
+            margin-top: 10px;
+            padding: 10px;
+            background: rgba(0,0,0,0.5);
+            border-left: 3px solid #00cc88;
+            font-size: 12px;
+            border-radius: 4px;
+            color: #88ff88;
+            min-height: 50px;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .response-box.error { border-left-color: #ff3333; color: #ff8888; }
+        .response-box.success { border-left-color: #00cc88; color: #88ff88; background: rgba(0,204,136,0.1); }
+        .response-box.info { border-left-color: #3399ff; color: #88ccff; background: rgba(51,153,255,0.1); }
+
+        .atm-keypad-area {
+            display: flex;
+            gap: 20px;
+            justify-content: center;
+            align-items: center;
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid #3a3a4a;
+        }
+
+        .keypad {
+            display: grid;
+            grid-template-columns: repeat(3, 65px);
+            gap: 8px;
+        }
+
+        .keypad-btn {
+            width: 65px;
+            height: 50px;
+            background: linear-gradient(145deg, #3a3a4a, #2a2a3a);
+            border: none;
+            border-radius: 8px;
+            color: white;
+            font-size: 22px;
+            font-weight: bold;
+            cursor: pointer;
+            box-shadow: 0 3px 0 #1a1a2a;
+            transition: all 0.05s;
+        }
+        .keypad-btn:active { transform: translateY(2px); box-shadow: 0 1px 0 #1a1a2a; }
+        .keypad-btn.clear { background: linear-gradient(145deg, #8b0000, #5c0000); color: #ff8888; }
+        .keypad-btn.enter { background: linear-gradient(145deg, #006400, #004400); color: #88ff88; }
+
+        .tabs { display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap; }
+        .tab-btn {
+            background: rgba(0,204,136,0.15);
+            border: 1px solid #00cc88;
+            padding: 8px 18px;
+            color: #00cc88;
+            cursor: pointer;
+            border-radius: 4px;
+            font-size: 12px;
+            transition: all 0.2s;
+        }
+        .tab-btn.active { background: rgba(0,204,136,0.35); color: #fff; border-color: #ff6b00; }
+        .tab-btn:hover { background: rgba(0,204,136,0.25); }
+
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+
+        .dispenser-status {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 10px;
+            color: #666;
+            font-size: 11px;
+            padding: 10px;
+            background: #1a1a2a;
+            border-radius: 8px;
+            margin-top: 10px;
+        }
+        .dispenser-led {
+            width: 8px;
+            height: 8px;
+            background: #00cc88;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse { 0%, 100% { opacity: 0.5; } 50% { opacity: 1; } }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: rgba(0,0,0,0.85);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+        .modal-content {
+            background: #0a3d2f;
+            padding: 30px;
+            border-radius: 15px;
+            text-align: center;
+            max-width: 400px;
+            width: 90%;
+            border: 2px solid #00cc88;
+        }
+        .modal-icon { font-size: 60px; margin-bottom: 15px; }
+        .modal-title { font-size: 24px; color: #00cc88; margin-bottom: 10px; }
+        .modal-message { color: #ccffcc; margin-bottom: 15px; white-space: pre-wrap; font-size: 13px; }
+        .modal-amount { font-size: 32px; color: #ff6b00; margin-bottom: 20px; font-weight: bold; }
+        .modal-btn {
+            background: #00cc88;
+            border: none;
+            padding: 12px 30px;
+            color: #0a3d2f;
+            font-weight: bold;
+            cursor: pointer;
+            border-radius: 5px;
+            font-size: 16px;
+        }
+        .modal-btn:hover { background: #00bb77; }
+
+        .loading-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: rgba(0,0,0,0.9);
+            z-index: 1001;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+        }
+        .spinner {
+            width: 60px;
+            height: 60px;
+            border: 4px solid #00cc88;
+            border-top-color: transparent;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .loading-text { color: #00cc88; margin-top: 20px; font-size: 18px; letter-spacing: 2px; }
+
+        .row-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+        @media (max-width: 600px) {
+            .atm-shell { padding: 10px; }
+            .atm-screen { padding: 10px; min-height: 400px; }
+            .keypad { grid-template-columns: repeat(3, 50px); }
+            .keypad-btn { width: 50px; height: 40px; font-size: 18px; }
+            .row-2col { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <div class="atm-container">
+        <div class="atm-shell">
+            <!-- ATM Top -->
+            <div class="atm-top-bezel">
+                <div class="atm-branding">
+                    <span class="brand-name">ZURUBANK</span>
+                    <span class="brand-sub">CARDLESS ATM</span>
+                </div>
+            </div>
+
+            <!-- ATM Screen -->
+            <div class="atm-screen">
+                <div class="screen-header">
+                    <span class="bank-name">🏦 ZURU BANK</span>
+                    <div>
+                        <span class="status-dot"></span>
+                        <span id="screenTime" class="screen-time">--:--</span>
+                    </div>
+                </div>
+
+                <div class="atm-screen-content">
+                    <!-- Tabs -->
+                    <div class="tabs">
+                        <button class="tab-btn active" data-tab="voucher">🎫 Voucher</button>
+                        <button class="tab-btn" data-tab="token">🔑 Token</button>
+                        <button class="tab-btn" data-tab="status">📊 Status</button>
+                    </div>
+
+                    <!-- Voucher Tab -->
+                    <div id="tab-voucher" class="tab-content active">
+                        <div class="row">
+                            <label>🎫 Voucher Number</label>
+                            <input type="text" id="voucher_number" placeholder="Enter 12-digit voucher number" maxlength="12">
+                        </div>
+                        <div class="row">
+                            <label>🔐 Voucher PIN</label>
+                            <input type="password" id="voucher_pin" placeholder="Enter 6-digit PIN" maxlength="6">
+                        </div>
+                        <div class="row">
+                            <label>💰 Amount (BWP)</label>
+                            <input type="number" id="voucher_amount" placeholder="Enter amount">
+                        </div>
+                        <div class="quick-amounts">
+                            <button onclick="setAmount('voucher_amount', 50)">P50</button>
+                            <button onclick="setAmount('voucher_amount', 100)">P100</button>
+                            <button onclick="setAmount('voucher_amount', 200)">P200</button>
+                            <button onclick="setAmount('voucher_amount', 500)">P500</button>
+                            <button onclick="setAmount('voucher_amount', 1000)">P1000</button>
+                        </div>
+                        <button class="btn btn-primary" onclick="cashoutVoucher()">💵 Cashout</button>
+                    </div>
+
+                    <!-- Token Tab -->
+                    <div id="tab-token" class="tab-content">
+                        <div class="row">
+                            <label>🔑 Trace Number</label>
+                            <input type="text" id="token_trace" placeholder="Enter trace number">
+                        </div>
+                        <div class="row">
+                            <label>🔐 Token PIN</label>
+                            <input type="password" id="token_pin" placeholder="Enter PIN" maxlength="6">
+                        </div>
+                        <button class="btn btn-secondary" onclick="redeemToken()">🔓 Redeem Token</button>
+                    </div>
+
+                    <!-- Status Tab -->
+                    <div id="tab-status" class="tab-content">
+                        <div class="row">
+                            <label>🔍 Trace Number</label>
+                            <input type="text" id="status_trace" placeholder="Enter trace number to check">
+                        </div>
+                        <button class="btn btn-success" onclick="checkStatus()">📊 Check Status</button>
+                        <div id="statusResult" class="response-box info">Enter a trace number to check status</div>
+                    </div>
+
+                    <!-- Response Box -->
+                    <div id="responseBox" class="response-box info">✅ ZuruBank ATM ready</div>
+
+                    <!-- Dispenser Status -->
+                    <div class="dispenser-status">
+                        <span class="dispenser-led"></span>
+                        <span>CASH DISPENSER READY</span>
+                        <span id="atmIdDisplay" style="color:#444;font-size:9px;">ATM: VIRTUALATM001</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Keypad -->
+            <div class="atm-keypad-area">
+                <div class="keypad">
+                    <button class="keypad-btn" data-key="1">1</button>
+                    <button class="keypad-btn" data-key="2">2</button>
+                    <button class="keypad-btn" data-key="3">3</button>
+                    <button class="keypad-btn" data-key="4">4</button>
+                    <button class="keypad-btn" data-key="5">5</button>
+                    <button class="keypad-btn" data-key="6">6</button>
+                    <button class="keypad-btn" data-key="7">7</button>
+                    <button class="keypad-btn" data-key="8">8</button>
+                    <button class="keypad-btn" data-key="9">9</button>
+                    <button class="keypad-btn clear" data-key="clear">C</button>
+                    <button class="keypad-btn" data-key="0">0</button>
+                    <button class="keypad-btn enter" data-key="enter">↵</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal -->
+    <div class="modal" id="transactionModal">
+        <div class="modal-content">
+            <div class="modal-icon" id="modalIcon">✅</div>
+            <div class="modal-title" id="modalTitle">Transaction Complete</div>
+            <div class="modal-message" id="modalMessage">Please take your cash</div>
+            <div class="modal-amount" id="modalAmount"></div>
+            <button class="modal-btn" onclick="closeModal()">Take Cash →</button>
+        </div>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div class="loading-overlay" id="loadingOverlay">
+        <div class="spinner"></div>
+        <div class="loading-text">PROCESSING...</div>
+    </div>
+
+    <script>
+        // ============================================================
+        // CONFIGURATION - Point to your ZuruBank backend
+        // ============================================================
+        const API_BASE = '/Backend/api/v1';
+        const ATM_BASE = '/Backend/ATM';
+        const NETWORK_BASE = '/Backend/network';
+        const ATM_ID = 'VIRTUALATM001';
+
+        let currentFocus = null;
+        let isProcessing = false;
+
+        // ============================================================
+        // INITIALIZATION
+        // ============================================================
+        document.addEventListener('DOMContentLoaded', function() {
+            updateClock();
+            setInterval(updateClock, 1000);
+
+            document.getElementById('atmIdDisplay').textContent = 'ATM: ' + ATM_ID;
+
+            // Tab switching
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+                    document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+                    this.classList.add('active');
+                    document.getElementById('tab-' + this.dataset.tab).classList.add('active');
+                    showResponse('Ready for ' + this.textContent.trim(), 'info');
+                });
+            });
+
+            // Keypad
+            document.querySelectorAll('.keypad-btn').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    const key = this.dataset.key;
+                    handleKeyInput(key);
+                });
+            });
+
+            // Keyboard support
+            document.addEventListener('keydown', function(e) {
+                if (e.target.tagName === 'INPUT') return;
+                const key = e.key;
+                if (key >= '0' && key <= '9') { e.preventDefault(); handleKeyInput(key); }
+                else if (key === 'Enter') { e.preventDefault(); handleKeyInput('enter'); }
+                else if (key === 'Backspace') { e.preventDefault(); handleKeyInput('clear'); }
+            });
+
+            // Focus tracking
+            document.querySelectorAll('input').forEach(input => {
+                input.addEventListener('focus', function() { currentFocus = this; });
+                input.addEventListener('blur', function() {
+                    setTimeout(() => { if (document.activeElement !== this) currentFocus = null; }, 100);
+                });
+            });
+
+            showResponse('✅ ZuruBank ATM ready. Select a service.', 'info');
+            testConnection();
+        });
+
+        function updateClock() {
+            const now = new Date();
+            document.getElementById('screenTime').textContent = now.toLocaleTimeString('en-US', {
+                hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+            });
+        }
+
+        function handleKeyInput(key) {
+            if (key === 'clear') {
+                if (currentFocus) { currentFocus.value = ''; showResponse('Field cleared', 'info'); }
+                return;
+            }
+            if (key === 'enter') {
+                const activeTab = document.querySelector('.tab-content.active');
+                if (activeTab) {
+                    const id = activeTab.id;
+                    if (id === 'tab-voucher') cashoutVoucher();
+                    else if (id === 'tab-token') redeemToken();
+                    else if (id === 'tab-status') checkStatus();
+                }
+                return;
+            }
+            if (currentFocus && !currentFocus.disabled) {
+                currentFocus.value += key;
+                currentFocus.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+        }
+
+        function setAmount(fieldId, amount) {
+            document.getElementById(fieldId).value = amount;
+            showResponse(`Amount set to P${amount}`, 'success');
+        }
+
+        function showResponse(msg, type = 'info') {
+            const box = document.getElementById('responseBox');
+            box.className = `response-box ${type}`;
+            box.textContent = msg;
+        }
+
+        function showLoading(show, msg = 'PROCESSING...') {
+            const overlay = document.getElementById('loadingOverlay');
+            if (show) {
+                document.querySelector('.loading-text').textContent = msg;
+                overlay.style.display = 'flex';
+            } else {
+                overlay.style.display = 'none';
+            }
+        }
+
+        function showModal(title, message, amount = null, icon = '✅') {
+            document.getElementById('modalIcon').textContent = icon;
+            document.getElementById('modalTitle').textContent = title;
+            document.getElementById('modalMessage').textContent = message;
+            if (amount) {
+                document.getElementById('modalAmount').innerHTML = `P${parseFloat(amount).toFixed(2)}`;
+                document.getElementById('modalAmount').style.display = 'block';
+            } else {
+                document.getElementById('modalAmount').style.display = 'none';
+            }
+            document.getElementById('transactionModal').style.display = 'flex';
+        }
+
+        function closeModal() {
+            document.getElementById('transactionModal').style.display = 'none';
+            document.getElementById('voucher_number').value = '';
+            document.getElementById('voucher_pin').value = '';
+            document.getElementById('voucher_amount').value = '';
+            document.getElementById('token_trace').value = '';
+            document.getElementById('token_pin').value = '';
+            showResponse('Ready for next transaction', 'info');
+        }
+
+        // ============================================================
+        // API CALL - Uses your ZuruBank endpoints
+        // ============================================================
+        async function callAPI(endpoint, data) {
+            try {
+                const url = endpoint.startsWith('http') ? endpoint : `${API_BASE}${endpoint}`;
+                console.log(`Calling API: ${url}`, data);
+
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-ATM-ID': ATM_ID,
+                        'X-Requested-With': 'XMLHttpRequest'
+                    },
+                    body: JSON.stringify(data)
+                });
+
+                console.log(`Response Status: ${response.status}`);
+
+                if (!response.ok) {
+                    const text = await response.text();
+                    throw new Error(`HTTP ${response.status}: ${text.substring(0, 200)}`);
+                }
+
+                const result = await response.json();
+                console.log('API Response:', result);
+                return result;
+            } catch (error) {
+                console.error('API Error:', error);
+                throw error;
+            }
+        }
+
+        // ============================================================
+        // VOUCHER CASOUT - Uses Backend/api/v1/atm/atm_cashout.php
+        // ============================================================
+        async function cashoutVoucher() {
+            if (isProcessing) return;
+
+            const voucherNumber = document.getElementById('voucher_number').value.trim();
+            const voucherPin = document.getElementById('voucher_pin').value.trim();
+            const amount = parseFloat(document.getElementById('voucher_amount').value);
+
+            if (!voucherNumber) { showResponse('❌ Enter voucher number', 'error'); return; }
+            if (!voucherPin) { showResponse('❌ Enter voucher PIN', 'error'); return; }
+            if (!amount || amount < 10) { showResponse('❌ Enter valid amount (min P10)', 'error'); return; }
+
+            isProcessing = true;
+            showLoading(true, 'Processing voucher...');
+
+            try {
+                // Call the ATM cashout endpoint
+                const result = await callAPI('/atm/atm_cashout.php', {
+                    voucher_number: voucherNumber,
+                    voucher_pin: voucherPin,
+                    amount: amount,
+                    atm_id: ATM_ID,
+                    action: 'CASHOUT'
+                });
+
+                showLoading(false);
+
+                if (result.status === 'CASHOUT_SUCCESS' || result.success === true || result.status === 'SUCCESS') {
+                    showModal(
+                        '💵 CASH DISPENSED',
+                        `Voucher withdrawal successful!\nVoucher: ${voucherNumber}\nRef: ${result.cashout_reference || result.reference || 'N/A'}`,
+                        result.amount || amount,
+                        '💵'
+                    );
+                    showResponse(`✅ ${result.message || 'Cash dispensed successfully!'}`, 'success');
+                } else {
+                    showResponse(`❌ ${result.message || result.error || 'Transaction declined'}`, 'error');
+                }
+            } catch (error) {
+                showLoading(false);
+                showResponse(`❌ Error: ${error.message}`, 'error');
+            } finally {
+                isProcessing = false;
+            }
+        }
+
+        // ============================================================
+        // TOKEN REDEMPTION - Uses Backend/ATM/atm_validate.php
+        // ============================================================
+        async function redeemToken() {
+            if (isProcessing) return;
+
+            const trace = document.getElementById('token_trace').value.trim();
+            const pin = document.getElementById('token_pin').value.trim();
+
+            if (!trace) { showResponse('❌ Enter trace number', 'error'); return; }
+            if (!pin) { showResponse('❌ Enter PIN', 'error'); return; }
+
+            isProcessing = true;
+            showLoading(true, 'Redeeming token...');
+
+            try {
+                // Call the token validation endpoint
+                const result = await callAPI('/atm/atm_cashout.php', {
+                    trace_number: trace,
+                    token_pin: pin,
+                    atm_id: ATM_ID,
+                    action: 'REDEEM_TOKEN'
+                });
+
+                showLoading(false);
+
+                if (result.status === 'APPROVED' || result.success === true) {
+                    showModal(
+                        '🔑 TOKEN REDEEMED',
+                        `Token redeemed successfully!\nTrace: ${trace}\nRef: ${result.reference || 'N/A'}`,
+                        result.amount || 0,
+                        '🔑'
+                    );
+                    showResponse(`✅ ${result.message || 'Token redeemed!'}`, 'success');
+                } else {
+                    showResponse(`❌ ${result.message || result.error || 'Redemption failed'}`, 'error');
+                }
+            } catch (error) {
+                showLoading(false);
+                showResponse(`❌ Error: ${error.message}`, 'error');
+            } finally {
+                isProcessing = false;
+            }
+        }
+
+        // ============================================================
+        // CHECK STATUS - Uses Backend/api/v1/transaction/status.php
+        // ============================================================
+        async function checkStatus() {
+            if (isProcessing) return;
+
+            const trace = document.getElementById('status_trace').value.trim();
+
+            if (!trace) { showResponse('❌ Enter trace number', 'error'); return; }
+
+            isProcessing = true;
+            showLoading(true, 'Checking status...');
+
+            try {
+                const result = await callAPI('/transaction/status.php', {
+                    trace_number: trace,
+                    atm_id: ATM_ID
+                });
+
+                showLoading(false);
+
+                const statusResult = document.getElementById('statusResult');
+                if (result.status === 'SUCCESS' || result.success === true) {
+                    const data = result.data || result;
+                    statusResult.className = 'response-box success';
+                    statusResult.innerHTML = `
+                        ✅ Transaction Found\n
+                        Trace: ${data.trace_number || trace}\n
+                        Amount: P${data.amount || 0}\n
+                        Status: ${data.status || 'COMPLETED'}\n
+                        Reference: ${data.reference || 'N/A'}\n
+                        Time: ${data.timestamp || data.created_at || new Date().toLocaleString()}
+                    `;
+                } else {
+                    statusResult.className = 'response-box error';
+                    statusResult.textContent = `❌ ${result.message || 'Transaction not found'}`;
+                }
+            } catch (error) {
+                showLoading(false);
+                const statusResult = document.getElementById('statusResult');
+                statusResult.className = 'response-box error';
+                statusResult.textContent = `❌ Error: ${error.message}`;
+            } finally {
+                isProcessing = false;
+            }
+        }
+
+        // ============================================================
+        // TEST CONNECTION
+        // ============================================================
+        async function testConnection() {
+            try {
+                const response = await fetch(`${API_BASE}/auth.php`, {
+                    method: 'HEAD',
+                    headers: { 'X-ATM-ID': ATM_ID }
+                });
+                if (response.ok || response.status === 405) {
+                    showResponse('✅ Connected to ZuruBank backend', 'success');
+                } else {
+                    showResponse(`⚠️ Backend returned ${response.status}`, 'error');
+                }
+            } catch (error) {
+                showResponse(`⚠️ Cannot connect to backend: ${error.message}`, 'error');
+            }
+        }
+    </script>
+</body>
+</html>
