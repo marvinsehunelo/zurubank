@@ -1,7 +1,7 @@
 <?php 
 /**
  * /Backend/api/v1/verify_asset_zurubank.php
- * UPDATED - With better voucher detection
+ * UPDATED - Fixed voucher detection without length restriction
  */
 
 require_once __DIR__ . '/../../config/db.php';
@@ -81,14 +81,13 @@ $amount = floatval($input['amount'] ?? $input['value'] ?? 0);
 $reference = $input['reference'] ?? $input['transaction_reference'] ?? null;
 
 // ============================================================
-// FIX: If asset_type is VOUCHER but voucher_number is missing,
-// check if source_identifier is actually the voucher number
+// FIXED: If asset_type is VOUCHER but voucher_number is missing,
+// use source_identifier as the voucher number - NO LENGTH RESTRICTION
 // ============================================================
 if (($assetType === 'VOUCHER' || $assetType === 'CASHOUT-VOUCHER') && empty($voucherNumber)) {
-    // The source_identifier might actually be the voucher number
-    if (!empty($accountNumber) && preg_match('/^\d{12,15}$/', $accountNumber)) {
-        $voucherNumber = $accountNumber;
-        error_log("Using source_identifier as voucher_number: $voucherNumber");
+    if (!empty($accountNumber)) {
+        $voucherNumber = trim($accountNumber);
+        error_log("Using source_identifier as voucher_number: {$voucherNumber}");
     }
 }
 
