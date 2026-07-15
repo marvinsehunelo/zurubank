@@ -1,7 +1,8 @@
 <?php 
 /**
  * /Backend/api/v1/verify_asset_zurubank.php
- * UPDATED - Fixed voucher detection without length restriction
+ * UPDATED - PIN is OPTIONAL for ALL asset types (ACCOUNT, VOUCHER, CASHOUT-VOUCHER)
+ * Supports alternative authentication: access_token, source_reference, hooked sources
  */
 
 require_once __DIR__ . '/../../config/db.php';
@@ -40,8 +41,34 @@ $assetType = strtoupper(
 );
 
 // ============================================================
+// DETECT AUTHENTICATION METHOD
+// PIN is OPTIONAL for ALL asset types
+// ============================================================
+$pin = $input['pin'] ?? 
+       $input['wallet_pin'] ?? 
+       $input['atm_pin'] ?? 
+       $input['voucher_pin'] ?? 
+       $input['card_pin'] ?? 
+       $input['asset_fields']['wallet_pin'] ?? 
+       $input['asset_fields']['pin'] ?? 
+       $input['asset_fields']['atm_pin'] ?? 
+       $input['asset_fields']['voucher_pin'] ?? 
+       $input['source']['wallet_pin'] ?? 
+       $input['source']['pin'] ?? 
+       null;
+
+// Alternative authentication methods
+$accessToken = $input['access_token'] ?? null;
+$sourceReference = $input['source_reference'] ?? null;
+$isHooked = isset($input['_is_hooked']) && $input['_is_hooked'] === true;
+
+error_log("verify_asset: Auth methods - PIN: " . ($pin ? 'present' : 'null') . 
+          ", AccessToken: " . ($accessToken ? 'present' : 'null') . 
+          ", SourceRef: " . ($sourceReference ? 'present' : 'null') . 
+          ", IsHooked: " . ($isHooked ? 'true' : 'false'));
+
+// ============================================================
 // FIX: Check for voucher_number in MULTIPLE locations
-// The CertificateManager may be moving it
 // ============================================================
 $voucherNumber = $input['voucher_number'] ?? 
                  $input['voucher'] ?? 
@@ -52,7 +79,6 @@ $voucherNumber = $input['voucher_number'] ??
                  $input['source']['voucher_number'] ??
                  $input['source']['voucherNumber'] ??
                  $input['source']['voucher'] ??
-                 // Also check if it's been renamed in the certificate payload
                  $input['certificate_data']['voucher_number'] ??
                  $input['certificate_data']['voucher'] ??
                  null;
@@ -114,7 +140,7 @@ try {
     }
 
     // ============================================================
-    // HANDLE ACCOUNT TYPE
+    // HANDLE ACCOUNT TYPE (PIN OPTIONAL)
     // ============================================================
     if ($assetType === 'ACCOUNT') {
         error_log("Processing ACCOUNT verification for: $accountNumber");
@@ -133,6 +159,8 @@ try {
                 balance,
                 currency,
                 status,
+                is_frozen,
+                holder_name,
                 created_at
             FROM accounts
             WHERE account_number = :account_number
@@ -149,6 +177,10 @@ try {
             throw new Exception("Account is not active (status: {$account['status']})");
         }
 
+        if ($account['is_frozen'] == true) {
+            throw new Exception("Account is frozen");
+        }
+
         $availableBalance = floatval($account['balance']);
         
         // Check if sufficient balance
@@ -156,8 +188,33 @@ try {
             throw new Exception("Insufficient balance. Available: $availableBalance, Requested: $amount");
         }
 
-        // Get holder name from users table
-        $holderName = "Account Holder";
+        // ============================================================
+        // PIN IS OPTIONAL FOR ACCOUNT - Check if provided
+        // ============================================================
+        $pinVerified = false;
+        if ($pin) {
+            error_log("verify_asset: Optional PIN provided for account: " . substr($pin, -4));
+            
+            // Verify PIN against account or ewallet_pins
+            $pinStmt = $pdo->prepare("
+                SELECT id, pin, amount, is_redeemed, hold_status
+                FROM ewallet_pins 
+                WHERE pin = :pin 
+                AND is_redeemed = false 
+                AND (expires_at IS NULL OR expires_at > NOW())
+                LIMIT 1
+            ");
+            $pinStmt->execute(['pin' => $pin]);
+            if ($pinStmt->fetch()) {
+                $pinVerified = true;
+                error_log("verify_asset: Optional PIN verified for account");
+            } else {
+                error_log("verify_asset: Optional PIN invalid - proceeding with account verification only");
+            }
+        }
+
+        // Get holder name
+        $holderName = $account['holder_name'] ?? "Account Holder";
         if ($account['user_id']) {
             $userStmt = $pdo->prepare("SELECT full_name FROM users WHERE user_id = ?");
             $userStmt->execute([$account['user_id']]);
@@ -165,6 +222,18 @@ try {
             if ($user && $user['full_name']) {
                 $holderName = $user['full_name'];
             }
+        }
+
+        // Determine auth method
+        $authMethod = 'account_only';
+        if ($pinVerified) {
+            $authMethod = 'account_pin';
+        } elseif ($accessToken) {
+            $authMethod = 'account_token';
+        } elseif ($sourceReference) {
+            $authMethod = 'account_source_ref';
+        } elseif ($isHooked) {
+            $authMethod = 'account_hooked';
         }
 
         $responsePayload = [
@@ -178,11 +247,16 @@ try {
             "holder_name" => $holderName,
             "currency" => $account['currency'] ?? 'BWP',
             "account_type" => $account['account_type'],
+            "auth_method" => $authMethod,
+            "pin_verified" => $pinVerified,
+            "is_frozen" => $account['is_frozen'] == true,
             "metadata" => [
                 "account_id" => $account['account_id'],
                 "user_id" => $account['user_id'],
                 "status" => $account['status'],
-                "created_at" => $account['created_at']
+                "created_at" => $account['created_at'],
+                "is_hooked" => $isHooked,
+                "source_reference" => $sourceReference
             ]
         ];
 
@@ -191,7 +265,7 @@ try {
     }
 
     // ============================================================
-    // HANDLE VOUCHER AND CASHOUT-VOUCHER TYPE
+    // HANDLE VOUCHER AND CASHOUT-VOUCHER TYPE (PIN OPTIONAL)
     // ============================================================
     if (empty($voucherNumber)) {
         // Log all fields to debug
@@ -199,6 +273,9 @@ try {
         throw new Exception("Voucher number required. Available fields: " . implode(', ', array_keys($input)));
     }
 
+    // ============================================================
+    // VOUCHER VERIFICATION - PIN IS OPTIONAL
+    // ============================================================
     $pdo->beginTransaction();
 
     $stmt = $pdo->prepare("
@@ -221,7 +298,11 @@ try {
             sat_expires_at,
             external_reference,
             source_institution,
-            source_hold_reference
+            source_hold_reference,
+            is_on_hold,
+            hold_reference,
+            access_token,
+            source_reference
         FROM instant_money_vouchers
         WHERE voucher_number = :voucher_number
         LIMIT 1
@@ -260,15 +341,49 @@ try {
         }
     }
 
-    if ($voucher['voucher_pin']) {
-        if (!$voucherPin) {
-            throw new Exception("Voucher PIN required");
-        }
-        if ($voucherPin !== $voucher['voucher_pin']) {
-            throw new Exception("Invalid voucher PIN");
-        }
+    if ($voucher['is_on_hold'] == true) {
+        throw new Exception("Voucher is on hold. Hold reference: {$voucher['hold_reference']}");
     }
 
+    // ============================================================
+    // PIN IS OPTIONAL FOR VOUCHER - Check if provided
+    // ============================================================
+    $pinVerified = false;
+    
+    if ($voucher['voucher_pin']) {
+        if ($voucherPin || $pin) {
+            $pinToCheck = $voucherPin ?? $pin;
+            if ($pinToCheck === $voucher['voucher_pin']) {
+                $pinVerified = true;
+                error_log("verify_asset: Voucher PIN verified");
+            } else {
+                error_log("verify_asset: Voucher PIN invalid - proceeding with voucher verification only");
+                // Don't fail - PIN is optional
+            }
+        } else {
+            error_log("verify_asset: No PIN provided for voucher - proceeding without PIN");
+        }
+    } else {
+        // Voucher has no PIN set - that's fine
+        error_log("verify_asset: Voucher has no PIN set - proceeding");
+    }
+
+    // Check alternative authentication methods
+    $authMethod = 'voucher_only';
+    if ($pinVerified) {
+        $authMethod = 'voucher_pin';
+    } elseif ($accessToken && $voucher['access_token'] === $accessToken) {
+        $authMethod = 'voucher_token';
+        error_log("verify_asset: Voucher authenticated via access_token");
+    } elseif ($sourceReference && $voucher['source_reference'] === $sourceReference) {
+        $authMethod = 'voucher_source_ref';
+        error_log("verify_asset: Voucher authenticated via source_reference");
+    } elseif ($isHooked) {
+        $authMethod = 'voucher_hooked';
+        error_log("verify_asset: Voucher authenticated via hooked source");
+    }
+
+    // Check amount
     if ($amount > 0 && floatval($voucher['amount']) !== $amount) {
         throw new Exception("Voucher amount mismatch. Expected: {$voucher['amount']}, Requested: $amount");
     }
@@ -305,6 +420,9 @@ try {
         "holder_name" => $holderName,
         "recipient_phone" => $voucher['recipient_phone'],
         "expiry_date" => $voucher['voucher_expires_at'],
+        "is_on_hold" => $voucher['is_on_hold'] == true,
+        "auth_method" => $authMethod,
+        "pin_verified" => $pinVerified,
         "metadata" => [
             "voucher_id" => $voucher['voucher_id'],
             "currency" => $voucher['currency'] ?? 'BWP',
@@ -312,7 +430,10 @@ try {
             "status" => $voucher['status'],
             "created_at" => $voucher['created_at'],
             "external_reference" => $voucher['external_reference'],
-            "source_institution" => $voucher['source_institution']
+            "source_institution" => $voucher['source_institution'],
+            "hold_reference" => $voucher['hold_reference'],
+            "is_hooked" => $isHooked,
+            "source_reference" => $sourceReference
         ]
     ];
     
