@@ -4,10 +4,9 @@
  * Unified hold endpoint for Zurubank
  * Handles VOUCHER, ACCOUNT, and WALLET holds
  * 
+ * FIXED: Smart voucher number extraction (mirrors verify_asset.php)
  * FIXED: Only uses columns that exist in instant_money_vouchers table
- * Available columns: status, source_hold_reference, reference
- * NOT available: updated_at, hold_expires_at, held_by, hold_signature_verified
- * FIXED: Syntax error in financial_holds CREATE TABLE statement (}); → ");
+ * FIXED: Syntax error in financial_holds CREATE TABLE statement
  */
 
 require_once __DIR__ . '/../../config/db.php';
@@ -69,7 +68,7 @@ try {
     $assetType = strtoupper($input['asset_type'] ?? $input['type'] ?? '');
     
     // ============================================================
-    // Extract voucher_number from MULTIPLE locations
+    // SMART VOUCHER NUMBER EXTRACTION (MIRRORS verify_asset.php)
     // ============================================================
     $voucherNumber = $input['voucher_number'] ?? 
                      $input['voucher'] ?? 
@@ -89,13 +88,68 @@ try {
     $phone = $input['phone'] ?? $input['wallet_phone'] ?? $input['ewallet_phone'] ?? null;
     
     // ============================================================
-    // If asset_type is VOUCHER but voucher_number is missing,
+    // SMART FALLBACK: If asset_type is VOUCHER but voucher_number is missing,
     // check if source_identifier is actually the voucher number
     // ============================================================
     if (($assetType === 'VOUCHER' || $assetType === 'CASHOUT-VOUCHER') && empty($voucherNumber)) {
         if (!empty($accountNumber) && preg_match('/^\d{12,15}$/', $accountNumber)) {
             $voucherNumber = $accountNumber;
             error_log("Using source_identifier as voucher_number: $voucherNumber");
+        }
+    }
+    
+    // ============================================================
+    // ADDITIONAL FALLBACK: Check reference for voucher number
+    // ============================================================
+    if (empty($voucherNumber) && !empty($input['reference'])) {
+        // Try to extract from reference: HOLD_625448346_1784185986
+        if (preg_match('/HOLD_(\d+)_/', $input['reference'], $matches)) {
+            $voucherNumber = $matches[1];
+            error_log("Extracted voucher_number from reference: $voucherNumber");
+        }
+    }
+    
+    // ============================================================
+    // FINAL FALLBACK: Check any field that looks like a 12-15 digit number
+    // ============================================================
+    if (empty($voucherNumber)) {
+        foreach ($input as $key => $value) {
+            if (is_string($value) && preg_match('/^\d{12,15}$/', $value) && strlen($value) >= 12) {
+                $voucherNumber = $value;
+                error_log("Auto-detected voucher_number from field '$key': $voucherNumber");
+                break;
+            }
+        }
+    }
+    
+    // ============================================================
+    // EXTRACT PIN FROM MULTIPLE SOURCES (mirrors verify_asset.php)
+    // ============================================================
+    $voucherPin = $input['voucher_pin'] ?? 
+                  $input['voucherPIN'] ?? 
+                  $input['voucherPin'] ?? 
+                  $input['pin'] ?? 
+                  $input['pin_code'] ?? 
+                  $input['voucher']['pin'] ?? 
+                  $input['source']['pin'] ?? 
+                  $input['source']['voucher_pin'] ?? 
+                  null;
+    
+    // ============================================================
+    // AUTO-DETECT ASSET TYPE (mirrors verify_asset.php)
+    // ============================================================
+    if (empty($assetType)) {
+        if ($voucherNumber) {
+            $assetType = 'VOUCHER';
+            error_log("Auto-detected asset type: VOUCHER from voucher_number");
+        } elseif ($accountNumber) {
+            $assetType = 'ACCOUNT';
+            error_log("Auto-detected asset type: ACCOUNT from account_number");
+        } elseif ($phone) {
+            $assetType = 'WALLET';
+            error_log("Auto-detected asset type: WALLET from phone");
+        } else {
+            throw new Exception("Could not determine asset type");
         }
     }
     
@@ -106,19 +160,7 @@ try {
         throw new Exception("Hold reference is required");
     }
     
-    if (empty($assetType)) {
-        if ($voucherNumber) {
-            $assetType = 'VOUCHER';
-        } elseif ($accountNumber) {
-            $assetType = 'ACCOUNT';
-        } elseif ($phone) {
-            $assetType = 'WALLET';
-        } else {
-            throw new Exception("Could not determine asset type");
-        }
-    }
-    
-    error_log("ZURUBANK HOLD: Action: $action, AssetType: $assetType, HoldRef: $holdReference, Amount: $amount");
+    error_log("ZURUBANK HOLD: Action: $action, AssetType: $assetType, HoldRef: $holdReference, Amount: $amount, VoucherNum: $voucherNumber");
 
     if ($amount <= 0) {
         throw new Exception("Valid amount required");
@@ -134,7 +176,7 @@ try {
     // ============================================================
     // VOUCHER HANDLING - FIXED: Only uses columns that exist
     // ============================================================
-    if ($assetType === 'VOUCHER') {
+    if ($assetType === 'VOUCHER' || $assetType === 'CASHOUT-VOUCHER') {
         if (!$voucherNumber) {
             error_log("Voucher number missing. Available fields: " . implode(', ', array_keys($input)));
             throw new Exception("Voucher number required. Available fields: " . implode(', ', array_keys($input)));
@@ -161,7 +203,28 @@ try {
         }
 
         if (!$voucher) {
+            // Try case-insensitive
+            $stmt = $pdo->prepare("
+                SELECT * FROM instant_money_vouchers
+                WHERE LOWER(TRIM(voucher_number)) = LOWER(TRIM(:voucher_number))
+                LIMIT 1
+            ");
+            $stmt->execute(['voucher_number' => $voucherNumber]);
+            $voucher = $stmt->fetch(PDO::FETCH_ASSOC);
+        }
+
+        if (!$voucher) {
+            error_log("ZURUBANK HOLD: Voucher not found: $voucherNumber");
             throw new Exception("Voucher not found: $voucherNumber");
+        }
+
+        // Verify PIN if provided
+        if ($voucherPin && isset($voucher['voucher_pin'])) {
+            if ($voucher['voucher_pin'] !== $voucherPin) {
+                error_log("ZURUBANK HOLD: Invalid PIN for voucher $voucherNumber");
+                throw new Exception("Invalid voucher PIN");
+            }
+            error_log("ZURUBANK HOLD: PIN verified for voucher $voucherNumber");
         }
 
         if (in_array($action, ['HOLD', 'PLACE', 'PLACE_HOLD'])) {
@@ -173,8 +236,6 @@ try {
             }
             
             // ✅ CORRECT: Only use columns that exist in instant_money_vouchers
-            // Available: status, source_hold_reference
-            // NOT available: updated_at, hold_expires_at, held_by, hold_signature_verified
             $stmt = $pdo->prepare("
                 UPDATE instant_money_vouchers
                 SET status = 'hold',
@@ -206,7 +267,6 @@ try {
                 throw new Exception("Voucher is not currently on hold");
             }
             
-            // ✅ CORRECT: Only use columns that exist
             $stmt = $pdo->prepare("
                 UPDATE instant_money_vouchers
                 SET status = 'active',
@@ -470,7 +530,7 @@ try {
         }
 
     // ============================================================
-    // WALLET HANDLING - FIXED: Syntax error in CREATE TABLE statement
+    // WALLET HANDLING
     // ============================================================
     } elseif ($assetType === 'WALLET' || $assetType === 'E-WALLET' || $assetType === 'EWALLET') {
         if (!$phone) {
@@ -499,7 +559,6 @@ try {
         }
 
         if (in_array($action, ['HOLD', 'PLACE', 'PLACE_HOLD'])) {
-            // ✅ FIXED: Changed }); to ");
             $pdo->exec("
                 CREATE TABLE IF NOT EXISTS financial_holds (
                     id BIGSERIAL PRIMARY KEY,
