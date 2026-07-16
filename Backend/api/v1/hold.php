@@ -1,145 +1,323 @@
-<?php 
+<?php
 /**
- * /Backend/api/v1/verify_asset_zurubank.php
+ * backend/api/v1/hold.php
+ * Unified hold endpoint for Zurubank
+ * Handles VOUCHER, ACCOUNT, and WALLET holds
+ * 
+ * FIXED: Smart voucher number extraction (mirrors verify_asset.php)
+ * FIXED: Only uses columns that exist in instant_money_vouchers table
+ * FIXED: Syntax error in financial_holds CREATE TABLE statement
  */
 
 require_once __DIR__ . '/../../config/db.php';
 require_once __DIR__ . '/../../helpers/crypto.php';
+require_once __DIR__ . '/../../helpers/CertificateManager.php';
 
-header("Content-Type: application/json");
-
-error_log("=== ZURUBANK verify_asset.php CALLED ===");
-error_log("RAW POST: " . file_get_contents("php://input"));
-
-if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-    http_response_code(405);
-    echo json_encode([
-        "success" => false,
-        "verified" => false, 
-        "message" => "Method not allowed"
-    ]);
-    exit;
-}
-
-$input = json_decode(file_get_contents("php://input"), true);
-
-error_log("Parsed input: " . json_encode($input));
-
-$assetType = strtoupper(
-    $input['asset_type'] ?? 
-    $input['type'] ?? 
-    $input['source']['asset_type'] ?? 
-    ''
-);
-
-$pin = $input['pin'] ?? 
-       $input['wallet_pin'] ?? 
-       $input['atm_pin'] ?? 
-       $input['voucher_pin'] ?? 
-       $input['card_pin'] ?? 
-       $input['asset_fields']['wallet_pin'] ?? 
-       $input['asset_fields']['pin'] ?? 
-       $input['asset_fields']['atm_pin'] ?? 
-       $input['asset_fields']['voucher_pin'] ?? 
-       $input['source']['wallet_pin'] ?? 
-       $input['source']['pin'] ?? 
-       null;
-
-$accessToken = $input['access_token'] ?? null;
-$sourceReference = $input['source_reference'] ?? null;
-$isHooked = isset($input['_is_hooked']) && $input['_is_hooked'] === true;
-
-error_log("verify_asset: Auth methods - PIN: " . ($pin ? 'present' : 'null') . 
-          ", AccessToken: " . ($accessToken ? 'present' : 'null') . 
-          ", SourceRef: " . ($sourceReference ? 'present' : 'null') . 
-          ", IsHooked: " . ($isHooked ? 'true' : 'false'));
-
-$voucherNumber = $input['voucher_number'] ?? 
-                 $input['voucher'] ?? 
-                 $input['voucherNumber'] ?? 
-                 $input['voucher_no'] ?? 
-                 $input['voucherId'] ?? 
-                 $input['source']['voucher']['voucher_number'] ?? 
-                 $input['source']['voucher_number'] ??
-                 $input['source']['voucherNumber'] ??
-                 $input['source']['voucher'] ??
-                 $input['certificate_data']['voucher_number'] ??
-                 $input['certificate_data']['voucher'] ??
-                 null;
-
-$voucherPin = $input['voucher_pin'] ?? 
-              $input['voucherPin'] ?? 
-              $input['voucherPIN'] ?? 
-              $input['pin'] ?? 
-              $input['source']['voucher']['voucher_pin'] ??
-              $input['source']['pin'] ??
-              null;
-
-$accountNumber = $input['source_identifier'] ?? 
-                 $input['account_number'] ?? 
-                 $input['source']['account_number'] ??
-                 $input['source']['identifier'] ??
-                 null;
-
-$claimantPhone = $input['claimant_phone'] ?? 
-                 $input['phone'] ?? 
-                 $input['source']['voucher']['claimant_phone'] ??
-                 $input['source']['phone'] ??
-                 null;
-
-$amount = floatval($input['amount'] ?? $input['value'] ?? 0);
-$reference = $input['reference'] ?? $input['transaction_reference'] ?? null;
-
-if (($assetType === 'VOUCHER' || $assetType === 'CASHOUT-VOUCHER') && empty($voucherNumber)) {
-    if (!empty($accountNumber)) {
-        $voucherNumber = trim($accountNumber);
-        error_log("Using source_identifier as voucher_number: {$voucherNumber}");
-    }
-}
-
-error_log("Normalized - Type: $assetType, Voucher: $voucherNumber, Account: $accountNumber, Phone: $claimantPhone, Amount: $amount");
-
-if ($assetType !== 'VOUCHER' && $assetType !== 'CASHOUT-VOUCHER' && $assetType !== 'ACCOUNT') {
-    error_log("ERROR: Unsupported asset type for ZURUBANK: $assetType");
-    echo json_encode([
-        "success" => true,
-        "verified" => false,
-        "message" => "ZURUBANK only supports VOUCHER, CASHOUT-VOUCHER, or ACCOUNT asset type",
-        "debug" => [
-            "received_type" => $assetType,
-            "supported_types" => ["VOUCHER", "CASHOUT-VOUCHER", "ACCOUNT"]
-        ]
-    ]);
-    exit;
-}
+header('Content-Type: application/json');
 
 try {
-    if (!isset($pdo)) {
-        throw new Exception("Database connection failed to initialize.");
+    $input = json_decode(file_get_contents('php://input'), true);
+    
+    error_log("=== ZURUBANK hold.php received ===");
+    error_log(json_encode($input));
+
+    // ============================================================
+    // CERTIFICATE-BASED VERIFICATION (REQUIRED)
+    // ============================================================
+    
+    if (!isset($input['certificate'])) {
+        error_log("ZURUBANK HOLD: No certificate provided");
+        http_response_code(200);
+        echo json_encode([
+            'status' => 'ERROR',
+            'hold_placed' => false,
+            'message' => 'Certificate required - please upgrade to certificate-based authentication'
+        ]);
+        exit;
+    }
+    
+    $certManager = new CertificateManager('ZURUBANK');
+    $verification = $certManager->verifySignedRequest($input);
+    $isValid = $verification['verified'];
+    $requester = $verification['requester'];
+    
+    error_log("ZURUBANK HOLD: Certificate verification: " . ($isValid ? "VALID ✓" : "INVALID ✗"));
+    error_log("ZURUBANK HOLD: Requester: {$requester}");
+    
+    if (!$isValid) {
+        error_log("ZURUBANK HOLD: Certificate verification failed");
+        http_response_code(200);
+        echo json_encode([
+            'status' => 'ERROR',
+            'hold_placed' => false,
+            'message' => 'Certificate verification failed: ' . ($verification['message'] ?? 'Unknown error')
+        ]);
+        exit;
+    }
+    
+    error_log("ZURUBANK HOLD: Request verified from {$requester} using certificate");
+
+    // ============================================================
+    // PROCESS HOLD
+    // ============================================================
+
+    // Determine action
+    $action = strtoupper(trim($input['action'] ?? $input['type'] ?? 'PLACE'));
+    
+    // Get asset type
+    $assetType = strtoupper($input['asset_type'] ?? $input['type'] ?? '');
+    
+    // ============================================================
+    // SMART VOUCHER NUMBER EXTRACTION (MIRRORS verify_asset.php)
+    // ============================================================
+    $voucherNumber = $input['voucher_number'] ?? 
+                     $input['voucher'] ?? 
+                     $input['voucherNumber'] ?? 
+                     $input['voucher_no'] ?? 
+                     $input['voucherId'] ?? 
+                     $input['source']['voucher']['voucher_number'] ?? 
+                     $input['source']['voucher_number'] ??
+                     $input['source']['voucherNumber'] ??
+                     $input['source']['voucher'] ??
+                     $input['certificate_data']['voucher_number'] ??
+                     $input['certificate_data']['voucher'] ??
+                     null;
+    
+    // Get other identifiers
+    $accountNumber = $input['account_number'] ?? $input['account'] ?? $input['source_identifier'] ?? null;
+    $phone = $input['phone'] ?? $input['wallet_phone'] ?? $input['ewallet_phone'] ?? null;
+    
+    // ============================================================
+    // SMART FALLBACK: If asset_type is VOUCHER but voucher_number is missing,
+    // check if source_identifier is actually the voucher number
+    // ============================================================
+    if (($assetType === 'VOUCHER' || $assetType === 'CASHOUT-VOUCHER') && empty($voucherNumber)) {
+        if (!empty($accountNumber) && preg_match('/^\d{12,15}$/', $accountNumber)) {
+            $voucherNumber = $accountNumber;
+            error_log("Using source_identifier as voucher_number: $voucherNumber");
+        }
+    }
+    
+    // ============================================================
+    // ADDITIONAL FALLBACK: Check reference for voucher number
+    // ============================================================
+    if (empty($voucherNumber) && !empty($input['reference'])) {
+        // Try to extract from reference: HOLD_625448346_1784185986
+        if (preg_match('/HOLD_(\d+)_/', $input['reference'], $matches)) {
+            $voucherNumber = $matches[1];
+            error_log("Extracted voucher_number from reference: $voucherNumber");
+        }
+    }
+    
+    // ============================================================
+    // FINAL FALLBACK: Check any field that looks like a 12-15 digit number
+    // ============================================================
+    if (empty($voucherNumber)) {
+        foreach ($input as $key => $value) {
+            if (is_string($value) && preg_match('/^\d{12,15}$/', $value) && strlen($value) >= 12) {
+                $voucherNumber = $value;
+                error_log("Auto-detected voucher_number from field '$key': $voucherNumber");
+                break;
+            }
+        }
+    }
+    
+    // ============================================================
+    // EXTRACT PIN FROM MULTIPLE SOURCES (mirrors verify_asset.php)
+    // ============================================================
+    $voucherPin = $input['voucher_pin'] ?? 
+                  $input['voucherPIN'] ?? 
+                  $input['voucherPin'] ?? 
+                  $input['pin'] ?? 
+                  $input['pin_code'] ?? 
+                  $input['voucher']['pin'] ?? 
+                  $input['source']['pin'] ?? 
+                  $input['source']['voucher_pin'] ?? 
+                  null;
+    
+    // ============================================================
+    // AUTO-DETECT ASSET TYPE (mirrors verify_asset.php)
+    // ============================================================
+    if (empty($assetType)) {
+        if ($voucherNumber) {
+            $assetType = 'VOUCHER';
+            error_log("Auto-detected asset type: VOUCHER from voucher_number");
+        } elseif ($accountNumber) {
+            $assetType = 'ACCOUNT';
+            error_log("Auto-detected asset type: ACCOUNT from account_number");
+        } elseif ($phone) {
+            $assetType = 'WALLET';
+            error_log("Auto-detected asset type: WALLET from phone");
+        } else {
+            throw new Exception("Could not determine asset type");
+        }
+    }
+    
+    $amount = floatval($input['amount'] ?? $input['value'] ?? 0);
+    $holdReference = $input['reference'] ?? $input['hold_reference'] ?? null;
+    
+    if (!$holdReference) {
+        throw new Exception("Hold reference is required");
+    }
+    
+    error_log("ZURUBANK HOLD: Action: $action, AssetType: $assetType, HoldRef: $holdReference, Amount: $amount, VoucherNum: $voucherNumber");
+
+    if ($amount <= 0) {
+        throw new Exception("Valid amount required");
     }
 
-    if ($assetType === 'ACCOUNT') {
-        error_log("Processing ACCOUNT verification for: $accountNumber");
-        
-        if (empty($accountNumber)) {
-            throw new Exception("Account number required for ACCOUNT asset type");
+    // Start transaction
+    $pdo->beginTransaction();
+
+    $responsePayload = [];
+    $assetId = null;
+    $holdPlaced = false;
+
+    // ============================================================
+    // VOUCHER HANDLING - FIXED: Only uses columns that exist
+    // ============================================================
+    if ($assetType === 'VOUCHER' || $assetType === 'CASHOUT-VOUCHER') {
+        if (!$voucherNumber) {
+            error_log("Voucher number missing. Available fields: " . implode(', ', array_keys($input)));
+            throw new Exception("Voucher number required. Available fields: " . implode(', ', array_keys($input)));
         }
 
-        // FIX: Removed is_frozen column - it doesn't exist in the accounts table
+        $stmt = $pdo->prepare("
+            SELECT voucher_id, amount, status, recipient_phone, currency, voucher_pin
+            FROM instant_money_vouchers
+            WHERE voucher_number = :voucher_number
+            LIMIT 1
+            FOR UPDATE
+        ");
+        $stmt->execute(['voucher_number' => $voucherNumber]);
+        $voucher = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if (!$voucher) {
+            $stmt = $pdo->prepare("
+                SELECT * FROM instant_money_vouchers
+                WHERE TRIM(voucher_number) = TRIM(:voucher_number)
+                LIMIT 1
+            ");
+            $stmt->execute(['voucher_number' => $voucherNumber]);
+            $voucher = $stmt->fetch(PDO::FETCH_ASSOC);
+        }
+
+        if (!$voucher) {
+            // Try case-insensitive
+            $stmt = $pdo->prepare("
+                SELECT * FROM instant_money_vouchers
+                WHERE LOWER(TRIM(voucher_number)) = LOWER(TRIM(:voucher_number))
+                LIMIT 1
+            ");
+            $stmt->execute(['voucher_number' => $voucherNumber]);
+            $voucher = $stmt->fetch(PDO::FETCH_ASSOC);
+        }
+
+        if (!$voucher) {
+            error_log("ZURUBANK HOLD: Voucher not found: $voucherNumber");
+            throw new Exception("Voucher not found: $voucherNumber");
+        }
+
+        // Verify PIN if provided
+        if ($voucherPin && isset($voucher['voucher_pin'])) {
+            if ($voucher['voucher_pin'] !== $voucherPin) {
+                error_log("ZURUBANK HOLD: Invalid PIN for voucher $voucherNumber");
+                throw new Exception("Invalid voucher PIN");
+            }
+            error_log("ZURUBANK HOLD: PIN verified for voucher $voucherNumber");
+        }
+
+        if (in_array($action, ['HOLD', 'PLACE', 'PLACE_HOLD'])) {
+            if ($voucher['status'] === 'hold') {
+                throw new Exception("Voucher is already on hold");
+            }
+            if ($voucher['status'] !== 'active') {
+                throw new Exception("Voucher cannot be held (status: {$voucher['status']})");
+            }
+            
+            // ✅ CORRECT: Only use columns that exist in instant_money_vouchers
+            $stmt = $pdo->prepare("
+                UPDATE instant_money_vouchers
+                SET status = 'hold',
+                    source_hold_reference = :hold_reference
+                WHERE voucher_id = :voucher_id
+            ");
+            $stmt->execute([
+                'hold_reference' => $holdReference,
+                'voucher_id' => $voucher['voucher_id']
+            ]);
+            
+            $assetId = $voucher['voucher_id'];
+            $holdPlaced = true;
+            $responsePayload = [
+                'status' => 'SUCCESS',
+                'hold_placed' => true,
+                'message' => 'Voucher is now on hold',
+                'hold_reference' => $holdReference,
+                'asset_type' => 'VOUCHER',
+                'asset_id' => $voucher['voucher_id'],
+                'voucher_number' => $voucherNumber,
+                'amount' => floatval($voucher['amount']),
+                'currency' => $voucher['currency'] ?? 'BWP',
+                'recipient_phone' => $voucher['recipient_phone']
+            ];
+            
+        } elseif (in_array($action, ['RELEASE', 'RELEASE_HOLD', 'UNHOLD'])) {
+            if ($voucher['status'] !== 'hold') {
+                throw new Exception("Voucher is not currently on hold");
+            }
+            
+            $stmt = $pdo->prepare("
+                UPDATE instant_money_vouchers
+                SET status = 'active',
+                    source_hold_reference = NULL
+                WHERE voucher_id = :voucher_id
+                AND source_hold_reference = :hold_reference
+            ");
+            $stmt->execute([
+                'voucher_id' => $voucher['voucher_id'],
+                'hold_reference' => $holdReference
+            ]);
+            
+            $assetId = $voucher['voucher_id'];
+            $holdPlaced = false;
+            $responsePayload = [
+                'status' => 'SUCCESS',
+                'hold_placed' => false,
+                'message' => 'Voucher hold released',
+                'hold_reference' => $holdReference,
+                'asset_type' => 'VOUCHER',
+                'asset_id' => $voucher['voucher_id'],
+                'voucher_number' => $voucherNumber,
+                'amount' => floatval($voucher['amount'])
+            ];
+            
+        } else {
+            throw new Exception("Unsupported action for voucher: $action");
+        }
+
+    // ============================================================
+    // ACCOUNT HANDLING
+    // ============================================================
+    } elseif ($assetType === 'ACCOUNT') {
+        if (!$accountNumber) {
+            throw new Exception("Account number required");
+        }
+
         $stmt = $pdo->prepare("
             SELECT 
                 account_id,
-                user_id,
                 account_number,
-                account_type,
                 balance,
-                currency,
+                available_balance,
+                held_amount,
                 status,
-                holder_name,
-                created_at
+                currency,
+                user_id
             FROM accounts
             WHERE account_number = :account_number
             LIMIT 1
+            FOR UPDATE
         ");
         $stmt->execute(['account_number' => $accountNumber]);
         $account = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -152,242 +330,328 @@ try {
             throw new Exception("Account is not active (status: {$account['status']})");
         }
 
-        $availableBalance = floatval($account['balance']);
-        
-        if ($amount > 0 && $availableBalance < $amount) {
-            throw new Exception("Insufficient balance. Available: $availableBalance, Requested: $amount");
-        }
-
-        $pinVerified = false;
-        if ($pin) {
-            error_log("verify_asset: Optional PIN provided for account: " . substr($pin, -4));
-            
-            $pinStmt = $pdo->prepare("
-                SELECT id, pin, amount, is_redeemed, hold_status
-                FROM ewallet_pins 
-                WHERE pin = :pin 
-                AND is_redeemed = false 
-                AND (expires_at IS NULL OR expires_at > NOW())
-                LIMIT 1
+        if (in_array($action, ['HOLD', 'PLACE', 'PLACE_HOLD'])) {
+            // Ensure financial_holds table exists
+            $pdo->exec("
+                CREATE TABLE IF NOT EXISTS financial_holds (
+                    id BIGSERIAL PRIMARY KEY,
+                    account_id BIGINT,
+                    wallet_id BIGINT,
+                    amount DECIMAL(20,4) NOT NULL,
+                    hold_reference VARCHAR(100) UNIQUE NOT NULL,
+                    status VARCHAR(30) DEFAULT 'HELD',
+                    requester VARCHAR(100),
+                    signature_verified BOOLEAN DEFAULT FALSE,
+                    expires_at TIMESTAMP,
+                    debited_at TIMESTAMP,
+                    released_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )
             ");
-            $pinStmt->execute(['pin' => $pin]);
-            if ($pinStmt->fetch()) {
-                $pinVerified = true;
-                error_log("verify_asset: Optional PIN verified for account");
-            } else {
-                error_log("verify_asset: Optional PIN invalid - proceeding with account verification only");
+
+            $pdo->exec("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS available_balance DECIMAL(20,4) DEFAULT 0");
+            $pdo->exec("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS held_amount DECIMAL(20,4) DEFAULT 0");
+
+            $availableBalance = floatval($account['available_balance'] ?? $account['balance']);
+            
+            if ($availableBalance < $amount) {
+                throw new Exception(
+                    "Insufficient available balance. "
+                    . "Available: $availableBalance, Requested: $amount"
+                );
             }
-        }
 
-        $holderName = $account['holder_name'] ?? "Account Holder";
-        if ($account['user_id']) {
-            $userStmt = $pdo->prepare("SELECT full_name FROM users WHERE user_id = ?");
-            $userStmt->execute([$account['user_id']]);
-            $user = $userStmt->fetch(PDO::FETCH_ASSOC);
-            if ($user && $user['full_name']) {
-                $holderName = $user['full_name'];
+            $stmt = $pdo->prepare("
+                INSERT INTO financial_holds 
+                    (account_id, amount, hold_reference, status, requester, signature_verified, expires_at)
+                VALUES (?, ?, ?, 'HELD', ?, ?, NOW() + INTERVAL '24 hours')
+                RETURNING id
+            ");
+            $stmt->execute([$account['account_id'], $amount, $holdReference, $requester, $isValid ? 1 : 0]);
+            $holdId = $stmt->fetchColumn();
+
+            $stmt = $pdo->prepare("
+                UPDATE accounts 
+                SET available_balance = available_balance - :amount,
+                    held_amount = held_amount + :amount
+                WHERE account_id = :account_id 
+                AND available_balance >= :amount
+                RETURNING balance, available_balance, held_amount
+            ");
+            $stmt->execute([
+                'amount' => $amount,
+                'account_id' => $account['account_id']
+            ]);
+            $updated = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$updated) {
+                throw new Exception("Failed to reserve funds");
             }
-        }
+            
+            $assetId = $account['account_id'];
+            $holdPlaced = true;
+            $responsePayload = [
+                'status' => 'SUCCESS',
+                'hold_placed' => true,
+                'message' => 'Hold placed on account',
+                'hold_reference' => $holdReference,
+                'asset_type' => 'ACCOUNT',
+                'asset_id' => $account['account_id'],
+                'account_number' => $accountNumber,
+                'amount' => $amount,
+                'currency' => $account['currency'] ?? 'BWP',
+                'total_balance' => floatval($updated['balance']),
+                'available_balance' => floatval($updated['available_balance']),
+                'held_amount' => floatval($updated['held_amount']),
+                'hold_id' => $holdId
+            ];
+            
+        } elseif ($action === 'DEBIT' || $action === 'DEBIT_HOLD' || $action === 'DEBIT_FUNDS') {
+            $stmt = $pdo->prepare("
+                SELECT id, account_id, amount, status
+                FROM financial_holds
+                WHERE hold_reference = :hold_reference 
+                AND status = 'HELD'
+                AND account_id = :account_id
+                LIMIT 1
+                FOR UPDATE
+            ");
+            $stmt->execute([
+                'hold_reference' => $holdReference,
+                'account_id' => $account['account_id']
+            ]);
+            $hold = $stmt->fetch(PDO::FETCH_ASSOC);
 
-        $authMethod = 'account_only';
-        if ($pinVerified) {
-            $authMethod = 'account_pin';
-        } elseif ($accessToken) {
-            $authMethod = 'account_token';
-        } elseif ($sourceReference) {
-            $authMethod = 'account_source_ref';
-        } elseif ($isHooked) {
-            $authMethod = 'account_hooked';
-        }
-
-        $responsePayload = [
-            "success" => true,
-            "verified" => true,
-            "asset_id" => $account['account_id'],
-            "asset_type" => "ACCOUNT",
-            "account_number" => $account['account_number'],
-            "available_balance" => $availableBalance,
-            "balance" => $availableBalance,
-            "holder_name" => $holderName,
-            "currency" => $account['currency'] ?? 'BWP',
-            "account_type" => $account['account_type'],
-            "auth_method" => $authMethod,
-            "pin_verified" => $pinVerified,
-            "metadata" => [
-                "account_id" => $account['account_id'],
-                "user_id" => $account['user_id'],
-                "status" => $account['status'],
-                "created_at" => $account['created_at'],
-                "is_hooked" => $isHooked,
-                "source_reference" => $sourceReference
-            ]
-        ];
-
-        send_signed_response($responsePayload);
-        exit;
-    }
-
-    if (empty($voucherNumber)) {
-        error_log("Voucher number missing. Available fields: " . implode(', ', array_keys($input)));
-        throw new Exception("Voucher number required. Available fields: " . implode(', ', array_keys($input)));
-    }
-
-    $pdo->beginTransaction();
-
-    $stmt = $pdo->prepare("
-        SELECT 
-            voucher_id,
-            voucher_number,
-            voucher_pin,
-            amount,
-            currency,
-            status,
-            recipient_phone,
-            created_by,
-            redeemed_by,
-            created_at,
-            voucher_created_at,
-            voucher_expires_at,
-            redeemed_at,
-            sat_purchased,
-            sat_fee_paid_by,
-            sat_expires_at,
-            external_reference,
-            source_institution,
-            source_hold_reference
-        FROM instant_money_vouchers
-        WHERE voucher_number = :voucher_number
-        LIMIT 1
-        FOR UPDATE
-    ");
-    $stmt->execute(['voucher_number' => $voucherNumber]);
-    $voucher = $stmt->fetch(PDO::FETCH_ASSOC);
-
-    if (!$voucher) {
-        $stmt = $pdo->prepare("
-            SELECT 
-                voucher_id,
-                voucher_number,
-                voucher_pin,
-                amount,
-                currency,
-                status,
-                recipient_phone,
-                created_by,
-                redeemed_by,
-                created_at,
-                voucher_created_at,
-                voucher_expires_at,
-                redeemed_at,
-                sat_purchased,
-                sat_fee_paid_by,
-                sat_expires_at,
-                external_reference,
-                source_institution,
-                source_hold_reference
-            FROM instant_money_vouchers
-            WHERE TRIM(voucher_number) = TRIM(:voucher_number)
-            LIMIT 1
-        ");
-        $stmt->execute(['voucher_number' => $voucherNumber]);
-        $voucher = $stmt->fetch(PDO::FETCH_ASSOC);
-    }
-
-    if (!$voucher) {
-        throw new Exception("Voucher not found: $voucherNumber");
-    }
-    
-    if ($voucher['status'] !== 'active') {
-        throw new Exception("Voucher is not active (status: {$voucher['status']})");
-    }
-
-    if (!is_null($voucher['redeemed_at'])) {
-        throw new Exception("Voucher has already been redeemed");
-    }
-
-    if (!is_null($voucher['voucher_expires_at'])) {
-        $expiryTimestamp = strtotime($voucher['voucher_expires_at']);
-        if ($expiryTimestamp < time()) {
-            throw new Exception("Voucher has expired");
-        }
-    }
-
-    $pinVerified = false;
-    
-    if ($voucher['voucher_pin']) {
-        if ($voucherPin || $pin) {
-            $pinToCheck = $voucherPin ?? $pin;
-            if ($pinToCheck === $voucher['voucher_pin']) {
-                $pinVerified = true;
-                error_log("verify_asset: Voucher PIN verified");
-            } else {
-                error_log("verify_asset: Voucher PIN invalid - proceeding with voucher verification only");
+            if (!$hold) {
+                throw new Exception("No active hold found");
             }
+
+            if (floatval($hold['amount']) !== $amount) {
+                throw new Exception("Hold amount mismatch");
+            }
+
+            $stmt = $pdo->prepare("
+                UPDATE accounts 
+                SET balance = balance - :amount,
+                    held_amount = held_amount - :amount
+                WHERE account_id = :account_id 
+                AND balance >= :amount AND held_amount >= :amount
+                RETURNING balance, available_balance, held_amount
+            ");
+            $stmt->execute([
+                'amount' => $amount,
+                'account_id' => $account['account_id']
+            ]);
+            $updated = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$updated) {
+                throw new Exception("Insufficient balance for debit");
+            }
+
+            $stmt = $pdo->prepare("
+                UPDATE financial_holds SET status = 'DEBITED', debited_at = NOW()
+                WHERE id = :hold_id
+            ");
+            $stmt->execute(['hold_id' => $hold['id']]);
+
+            $responsePayload = [
+                'status' => 'SUCCESS',
+                'debited' => true,
+                'hold_reference' => $holdReference,
+                'asset_type' => 'ACCOUNT',
+                'asset_id' => $account['account_id'],
+                'amount' => $amount,
+                'total_balance' => floatval($updated['balance']),
+                'available_balance' => floatval($updated['available_balance']),
+                'held_amount' => floatval($updated['held_amount'])
+            ];
+            
+        } elseif (in_array($action, ['RELEASE', 'RELEASE_HOLD', 'UNHOLD'])) {
+            $stmt = $pdo->prepare("
+                SELECT id, account_id, amount, status
+                FROM financial_holds
+                WHERE hold_reference = :hold_reference 
+                AND status = 'HELD'
+                AND account_id = :account_id
+                LIMIT 1
+                FOR UPDATE
+            ");
+            $stmt->execute([
+                'hold_reference' => $holdReference,
+                'account_id' => $account['account_id']
+            ]);
+            $hold = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$hold) {
+                throw new Exception("No active hold found");
+            }
+
+            $stmt = $pdo->prepare("
+                UPDATE accounts 
+                SET available_balance = available_balance + :amount,
+                    held_amount = held_amount - :amount
+                WHERE account_id = :account_id 
+                AND held_amount >= :amount
+                RETURNING balance, available_balance, held_amount
+            ");
+            $stmt->execute([
+                'amount' => $hold['amount'],
+                'account_id' => $account['account_id']
+            ]);
+            $updated = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$updated) {
+                throw new Exception("Failed to release hold");
+            }
+
+            $stmt = $pdo->prepare("
+                UPDATE financial_holds 
+                SET status = 'RELEASED', released_at = NOW()
+                WHERE id = :hold_id
+            ");
+            $stmt->execute(['hold_id' => $hold['id']]);
+
+            $responsePayload = [
+                'status' => 'SUCCESS',
+                'hold_placed' => false,
+                'message' => 'Hold released',
+                'hold_reference' => $holdReference,
+                'asset_type' => 'ACCOUNT',
+                'asset_id' => $account['account_id'],
+                'amount' => floatval($hold['amount']),
+                'total_balance' => floatval($updated['balance']),
+                'available_balance' => floatval($updated['available_balance']),
+                'held_amount' => floatval($updated['held_amount'])
+            ];
+            
         } else {
-            error_log("verify_asset: No PIN provided for voucher - proceeding without PIN");
+            throw new Exception("Unsupported action: $action");
         }
+
+    // ============================================================
+    // WALLET HANDLING
+    // ============================================================
+    } elseif ($assetType === 'WALLET' || $assetType === 'E-WALLET' || $assetType === 'EWALLET') {
+        if (!$phone) {
+            throw new Exception("Phone number required for wallet hold");
+        }
+
+        $normalizedPhone = ltrim($phone, '+');
+
+        $stmt = $pdo->prepare("
+            SELECT w.wallet_id, w.balance, w.status, w.currency, u.user_id
+            FROM instant_money_wallets w
+            JOIN users u ON w.user_id = u.user_id
+            WHERE u.phone = :phone OR u.phone = :phone_with_plus
+            AND w.status = 'active'
+            LIMIT 1
+            FOR UPDATE
+        ");
+        $stmt->execute([
+            'phone' => $normalizedPhone,
+            'phone_with_plus' => $phone
+        ]);
+        $wallet = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if (!$wallet) {
+            throw new Exception("Wallet not found for phone: $phone");
+        }
+
+        if (in_array($action, ['HOLD', 'PLACE', 'PLACE_HOLD'])) {
+            $pdo->exec("
+                CREATE TABLE IF NOT EXISTS financial_holds (
+                    id BIGSERIAL PRIMARY KEY,
+                    wallet_id BIGINT,
+                    amount DECIMAL(20,4) NOT NULL,
+                    hold_reference VARCHAR(100) UNIQUE NOT NULL,
+                    status VARCHAR(30) DEFAULT 'HELD',
+                    requester VARCHAR(100),
+                    signature_verified BOOLEAN DEFAULT FALSE,
+                    expires_at TIMESTAMP,
+                    debited_at TIMESTAMP,
+                    released_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )
+            ");
+
+            if ($wallet['balance'] < $amount) {
+                throw new Exception("Insufficient funds in wallet");
+            }
+
+            $stmt = $pdo->prepare("
+                INSERT INTO financial_holds 
+                    (wallet_id, amount, hold_reference, status, requester, signature_verified, expires_at)
+                VALUES (?, ?, ?, 'HELD', ?, ?, NOW() + INTERVAL '24 hours')
+                RETURNING id
+            ");
+            $stmt->execute([$wallet['wallet_id'], $amount, $holdReference, $requester, $isValid ? 1 : 0]);
+            $holdId = $stmt->fetchColumn();
+            
+            $assetId = $wallet['wallet_id'];
+            $holdPlaced = true;
+            $responsePayload = [
+                'status' => 'SUCCESS',
+                'hold_placed' => true,
+                'message' => 'Hold placed on wallet',
+                'hold_reference' => $holdReference,
+                'asset_type' => 'WALLET',
+                'asset_id' => $wallet['wallet_id'],
+                'phone' => $phone,
+                'amount' => $amount,
+                'currency' => $wallet['currency'] ?? 'BWP',
+                'hold_id' => $holdId
+            ];
+            
+        } elseif (in_array($action, ['RELEASE', 'RELEASE_HOLD', 'UNHOLD'])) {
+            $stmt = $pdo->prepare("
+                UPDATE financial_holds 
+                SET status = 'RELEASED', 
+                    released_at = NOW()
+                WHERE hold_reference = :hold_reference 
+                AND status = 'HELD'
+                AND wallet_id = :wallet_id
+                RETURNING id, wallet_id
+            ");
+            $stmt->execute([
+                'hold_reference' => $holdReference,
+                'wallet_id' => $wallet['wallet_id']
+            ]);
+            $released = $stmt->fetch(PDO::FETCH_ASSOC);
+            
+            if (!$released) {
+                throw new Exception("No active hold found");
+            }
+            
+            $assetId = $released['wallet_id'] ?? null;
+            $holdPlaced = false;
+            $responsePayload = [
+                'status' => 'SUCCESS',
+                'hold_placed' => false,
+                'message' => 'Hold released from wallet',
+                'hold_reference' => $holdReference,
+                'asset_type' => 'WALLET',
+                'asset_id' => $assetId,
+                'phone' => $phone
+            ];
+            
+        } else {
+            throw new Exception("Unsupported action: $action");
+        }
+
     } else {
-        error_log("verify_asset: Voucher has no PIN set - proceeding");
-    }
-
-    $authMethod = 'voucher_only';
-    if ($pinVerified) {
-        $authMethod = 'voucher_pin';
-    } elseif ($isHooked) {
-        $authMethod = 'voucher_hooked';
-        error_log("verify_asset: Voucher authenticated via hooked source");
-    }
-
-    if ($amount > 0 && floatval($voucher['amount']) !== $amount) {
-        throw new Exception("Voucher amount mismatch. Expected: {$voucher['amount']}, Requested: $amount");
-    }
-
-    if ($claimantPhone && $voucher['recipient_phone']) {
-        $normalizedClaimant = preg_replace('/[^0-9]/', '', $claimantPhone);
-        $normalizedRecipient = preg_replace('/[^0-9]/', '', $voucher['recipient_phone']);
-        
-        if ($normalizedClaimant !== $normalizedRecipient) {
-            error_log("Phone mismatch: Claimant $normalizedClaimant vs Recipient $normalizedRecipient");
-        }
+        throw new Exception("Unsupported asset type: $assetType");
     }
 
     $pdo->commit();
     
-    $holderName = "Voucher Holder";
-    if ($voucher['recipient_phone'] && $voucher['created_by']) {
-        $userStmt = $pdo->prepare("SELECT full_name FROM users WHERE user_id = ?");
-        $userStmt->execute([$voucher['created_by']]);
-        $user = $userStmt->fetch(PDO::FETCH_ASSOC);
-        if ($user && $user['full_name']) {
-            $holderName = $user['full_name'];
-        }
-    }
+    error_log("ZURUBANK HOLD: Hold processed successfully - Ref: {$holdReference}, AssetType: {$assetType}");
     
-    $responsePayload = [
-        "success" => true,
-        "verified" => true,
-        "asset_id" => $voucher['voucher_id'],
-        "asset_type" => "VOUCHER",
-        "voucher_number" => $voucher['voucher_number'],
-        "available_balance" => floatval($voucher['amount']),
-        "balance" => floatval($voucher['amount']),
-        "holder_name" => $holderName,
-        "recipient_phone" => $voucher['recipient_phone'],
-        "expiry_date" => $voucher['voucher_expires_at'],
-        "status" => $voucher['status'],
-        "auth_method" => $authMethod,
-        "pin_verified" => $pinVerified,
-        "metadata" => [
-            "voucher_id" => $voucher['voucher_id'],
-            "currency" => $voucher['currency'] ?? 'BWP',
-            "sat_purchased" => $voucher['sat_purchased'] ?? false,
-            "status" => $voucher['status'],
-            "created_at" => $voucher['created_at'],
-            "external_reference" => $voucher['external_reference'],
-            "source_institution" => $voucher['source_institution'],
-            "is_hooked" => $isHooked
-        ]
-    ];
+    $responsePayload['verification_method'] = 'certificate';
+    $responsePayload['timestamp'] = time();
+    $responsePayload['requester'] = $requester;
+    $responsePayload['signature_verified'] = $isValid;
     
     send_signed_response($responsePayload);
 
@@ -395,21 +659,21 @@ try {
     if (isset($pdo) && $pdo->inTransaction()) {
         $pdo->rollBack();
     }
-    
-    error_log("ZURUBANK verify_asset error: " . $e->getMessage());
-    error_log("Trace: " . $e->getTraceAsString());
+    error_log("ZURUBANK hold.php ERROR: " . $e->getMessage());
+    error_log("ZURUBANK hold.php Trace: " . $e->getTraceAsString());
     
     http_response_code(200);
     echo json_encode([
-        "success" => true,
-        "verified" => false,
-        "message" => $e->getMessage(),
-        "timestamp" => time(),
-        "debug" => [
-            "asset_type" => $assetType,
-            "voucher_number" => $voucherNumber,
-            "account_number" => $accountNumber,
-            "all_fields" => array_keys($input)
+        'status' => 'ERROR',
+        'hold_placed' => false,
+        'message' => $e->getMessage(),
+        'timestamp' => time(),
+        'debug' => [
+            'asset_type' => $assetType ?? 'unknown',
+            'voucher_number' => $voucherNumber ?? null,
+            'account_number' => $accountNumber ?? null,
+            'phone' => $phone ?? null,
+            'hold_reference' => $holdReference ?? null
         ]
     ]);
 }
