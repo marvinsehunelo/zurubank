@@ -3,10 +3,6 @@
  * backend/api/v1/hold.php
  * Unified hold endpoint for Zurubank
  * Handles VOUCHER, ACCOUNT, and WALLET holds
- * 
- * FIXED: Smart voucher number extraction (mirrors verify_asset.php)
- * FIXED: Only uses columns that exist in instant_money_vouchers table
- * FIXED: Syntax error in financial_holds CREATE TABLE statement
  */
 
 require_once __DIR__ . '/../../config/db.php';
@@ -102,7 +98,6 @@ try {
     // ADDITIONAL FALLBACK: Check reference for voucher number
     // ============================================================
     if (empty($voucherNumber) && !empty($input['reference'])) {
-        // Try to extract from reference: HOLD_625448346_1784185986
         if (preg_match('/HOLD_(\d+)_/', $input['reference'], $matches)) {
             $voucherNumber = $matches[1];
             error_log("Extracted voucher_number from reference: $voucherNumber");
@@ -174,7 +169,7 @@ try {
     $holdPlaced = false;
 
     // ============================================================
-    // VOUCHER HANDLING - FIXED: Only uses columns that exist
+    // VOUCHER HANDLING
     // ============================================================
     if ($assetType === 'VOUCHER' || $assetType === 'CASHOUT-VOUCHER') {
         if (!$voucherNumber) {
@@ -203,7 +198,6 @@ try {
         }
 
         if (!$voucher) {
-            // Try case-insensitive
             $stmt = $pdo->prepare("
                 SELECT * FROM instant_money_vouchers
                 WHERE LOWER(TRIM(voucher_number)) = LOWER(TRIM(:voucher_number))
@@ -218,7 +212,6 @@ try {
             throw new Exception("Voucher not found: $voucherNumber");
         }
 
-        // Verify PIN if provided
         if ($voucherPin && isset($voucher['voucher_pin'])) {
             if ($voucher['voucher_pin'] !== $voucherPin) {
                 error_log("ZURUBANK HOLD: Invalid PIN for voucher $voucherNumber");
@@ -235,7 +228,6 @@ try {
                 throw new Exception("Voucher cannot be held (status: {$voucher['status']})");
             }
             
-            // ✅ CORRECT: Only use columns that exist in instant_money_vouchers
             $stmt = $pdo->prepare("
                 UPDATE instant_money_vouchers
                 SET status = 'hold',
@@ -297,7 +289,7 @@ try {
         }
 
     // ============================================================
-    // ACCOUNT HANDLING
+    // ACCOUNT HANDLING - FIXED: Use balance directly (same as verify_asset)
     // ============================================================
     } elseif ($assetType === 'ACCOUNT') {
         if (!$accountNumber) {
@@ -309,8 +301,6 @@ try {
                 account_id,
                 account_number,
                 balance,
-                available_balance,
-                held_amount,
                 status,
                 currency,
                 user_id
@@ -350,18 +340,19 @@ try {
                 )
             ");
 
-            $pdo->exec("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS available_balance DECIMAL(20,4) DEFAULT 0");
-            $pdo->exec("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS held_amount DECIMAL(20,4) DEFAULT 0");
-
-            $availableBalance = floatval($account['available_balance'] ?? $account['balance']);
+            // FIX: Use balance directly (same as verify_asset)
+            $balance = floatval($account['balance'] ?? 0);
             
-            if ($availableBalance < $amount) {
+            error_log("ZURUBANK HOLD: Account balance: $balance, Requested: $amount");
+            
+            if ($balance < $amount) {
                 throw new Exception(
-                    "Insufficient available balance. "
-                    . "Available: $availableBalance, Requested: $amount"
+                    "Insufficient balance. "
+                    . "Available: $balance, Requested: $amount"
                 );
             }
 
+            // Insert hold record
             $stmt = $pdo->prepare("
                 INSERT INTO financial_holds 
                     (account_id, amount, hold_reference, status, requester, signature_verified, expires_at)
@@ -371,13 +362,13 @@ try {
             $stmt->execute([$account['account_id'], $amount, $holdReference, $requester, $isValid ? 1 : 0]);
             $holdId = $stmt->fetchColumn();
 
+            // Update account balance - reduce balance directly
             $stmt = $pdo->prepare("
                 UPDATE accounts 
-                SET available_balance = available_balance - :amount,
-                    held_amount = held_amount + :amount
+                SET balance = balance - :amount
                 WHERE account_id = :account_id 
-                AND available_balance >= :amount
-                RETURNING balance, available_balance, held_amount
+                AND balance >= :amount
+                RETURNING balance
             ");
             $stmt->execute([
                 'amount' => $amount,
@@ -402,8 +393,6 @@ try {
                 'amount' => $amount,
                 'currency' => $account['currency'] ?? 'BWP',
                 'total_balance' => floatval($updated['balance']),
-                'available_balance' => floatval($updated['available_balance']),
-                'held_amount' => floatval($updated['held_amount']),
                 'hold_id' => $holdId
             ];
             
@@ -433,11 +422,10 @@ try {
 
             $stmt = $pdo->prepare("
                 UPDATE accounts 
-                SET balance = balance - :amount,
-                    held_amount = held_amount - :amount
+                SET balance = balance - :amount
                 WHERE account_id = :account_id 
-                AND balance >= :amount AND held_amount >= :amount
-                RETURNING balance, available_balance, held_amount
+                AND balance >= :amount
+                RETURNING balance
             ");
             $stmt->execute([
                 'amount' => $amount,
@@ -462,9 +450,7 @@ try {
                 'asset_type' => 'ACCOUNT',
                 'asset_id' => $account['account_id'],
                 'amount' => $amount,
-                'total_balance' => floatval($updated['balance']),
-                'available_balance' => floatval($updated['available_balance']),
-                'held_amount' => floatval($updated['held_amount'])
+                'total_balance' => floatval($updated['balance'])
             ];
             
         } elseif (in_array($action, ['RELEASE', 'RELEASE_HOLD', 'UNHOLD'])) {
@@ -489,11 +475,9 @@ try {
 
             $stmt = $pdo->prepare("
                 UPDATE accounts 
-                SET available_balance = available_balance + :amount,
-                    held_amount = held_amount - :amount
+                SET balance = balance + :amount
                 WHERE account_id = :account_id 
-                AND held_amount >= :amount
-                RETURNING balance, available_balance, held_amount
+                RETURNING balance
             ");
             $stmt->execute([
                 'amount' => $hold['amount'],
@@ -520,9 +504,7 @@ try {
                 'asset_type' => 'ACCOUNT',
                 'asset_id' => $account['account_id'],
                 'amount' => floatval($hold['amount']),
-                'total_balance' => floatval($updated['balance']),
-                'available_balance' => floatval($updated['available_balance']),
-                'held_amount' => floatval($updated['held_amount'])
+                'total_balance' => floatval($updated['balance'])
             ];
             
         } else {
