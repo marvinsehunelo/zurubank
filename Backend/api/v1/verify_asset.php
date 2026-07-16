@@ -278,6 +278,7 @@ try {
     // ============================================================
     $pdo->beginTransaction();
 
+    // FIXED: Removed is_on_hold column - check hold_reference instead
     $stmt = $pdo->prepare("
         SELECT 
             voucher_id,
@@ -299,7 +300,6 @@ try {
             external_reference,
             source_institution,
             source_hold_reference,
-            is_on_hold,
             hold_reference,
             access_token,
             source_reference
@@ -314,7 +314,30 @@ try {
     if (!$voucher) {
         // Try with trim
         $stmt = $pdo->prepare("
-            SELECT * FROM instant_money_vouchers
+            SELECT 
+                voucher_id,
+                voucher_number,
+                voucher_pin,
+                amount,
+                currency,
+                status,
+                recipient_phone,
+                created_by,
+                redeemed_by,
+                created_at,
+                voucher_created_at,
+                voucher_expires_at,
+                redeemed_at,
+                sat_purchased,
+                sat_fee_paid_by,
+                sat_expires_at,
+                external_reference,
+                source_institution,
+                source_hold_reference,
+                hold_reference,
+                access_token,
+                source_reference
+            FROM instant_money_vouchers
             WHERE TRIM(voucher_number) = TRIM(:voucher_number)
             LIMIT 1
         ");
@@ -341,7 +364,8 @@ try {
         }
     }
 
-    if ($voucher['is_on_hold'] == true) {
+    // FIXED: Check hold_reference instead of is_on_hold
+    if (!empty($voucher['hold_reference'])) {
         throw new Exception("Voucher is on hold. Hold reference: {$voucher['hold_reference']}");
     }
 
@@ -420,7 +444,7 @@ try {
         "holder_name" => $holderName,
         "recipient_phone" => $voucher['recipient_phone'],
         "expiry_date" => $voucher['voucher_expires_at'],
-        "is_on_hold" => $voucher['is_on_hold'] == true,
+        "is_on_hold" => !empty($voucher['hold_reference']),
         "auth_method" => $authMethod,
         "pin_verified" => $pinVerified,
         "metadata" => [
