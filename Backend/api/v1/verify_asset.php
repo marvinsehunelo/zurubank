@@ -125,6 +125,7 @@ try {
             throw new Exception("Account number required for ACCOUNT asset type");
         }
 
+        // FIX: Removed holder_name - it doesn't exist in the accounts table
         $stmt = $pdo->prepare("
             SELECT 
                 account_id,
@@ -134,7 +135,6 @@ try {
                 balance,
                 currency,
                 status,
-                holder_name,
                 created_at
             FROM accounts
             WHERE account_number = :account_number
@@ -178,7 +178,8 @@ try {
             }
         }
 
-        $holderName = $account['holder_name'] ?? "Account Holder";
+        // Get holder name from users table using user_id
+        $holderName = "Account Holder";
         if ($account['user_id']) {
             $userStmt = $pdo->prepare("SELECT full_name FROM users WHERE user_id = ?");
             $userStmt->execute([$account['user_id']]);
