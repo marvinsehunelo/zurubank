@@ -64,7 +64,7 @@ try {
     $assetType = strtoupper($input['asset_type'] ?? $input['type'] ?? '');
     
     // ============================================================
-    // SMART VOUCHER NUMBER EXTRACTION (MIRRORS verify_asset.php)
+    // SMART VOUCHER NUMBER EXTRACTION (MIRRORS verify_asset_zurubank.php)
     // ============================================================
     $voucherNumber = $input['voucher_number'] ?? 
                      $input['voucher'] ?? 
@@ -89,8 +89,8 @@ try {
     // ============================================================
     if (($assetType === 'VOUCHER' || $assetType === 'CASHOUT-VOUCHER') && empty($voucherNumber)) {
         if (!empty($accountNumber) && preg_match('/^\d{12,15}$/', $accountNumber)) {
-            $voucherNumber = $accountNumber;
-            error_log("Using source_identifier as voucher_number: $voucherNumber");
+            $voucherNumber = trim($accountNumber);
+            error_log("ZURUBANK HOLD: Using source_identifier as voucher_number: $voucherNumber");
         }
     }
     
@@ -100,25 +100,26 @@ try {
     if (empty($voucherNumber) && !empty($input['reference'])) {
         if (preg_match('/HOLD_(\d+)_/', $input['reference'], $matches)) {
             $voucherNumber = $matches[1];
-            error_log("Extracted voucher_number from reference: $voucherNumber");
+            error_log("ZURUBANK HOLD: Extracted voucher_number from reference: $voucherNumber");
         }
     }
     
     // ============================================================
     // FINAL FALLBACK: Check any field that looks like a 12-15 digit number
+    // (copied from verify_asset_zurubank.php logic)
     // ============================================================
     if (empty($voucherNumber)) {
         foreach ($input as $key => $value) {
             if (is_string($value) && preg_match('/^\d{12,15}$/', $value) && strlen($value) >= 12) {
-                $voucherNumber = $value;
-                error_log("Auto-detected voucher_number from field '$key': $voucherNumber");
+                $voucherNumber = trim($value);
+                error_log("ZURUBANK HOLD: Auto-detected voucher_number from field '$key': $voucherNumber");
                 break;
             }
         }
     }
     
     // ============================================================
-    // EXTRACT PIN FROM MULTIPLE SOURCES (mirrors verify_asset.php)
+    // EXTRACT PIN FROM MULTIPLE SOURCES (mirrors verify_asset_zurubank.php)
     // ============================================================
     $voucherPin = $input['voucher_pin'] ?? 
                   $input['voucherPIN'] ?? 
@@ -128,21 +129,23 @@ try {
                   $input['voucher']['pin'] ?? 
                   $input['source']['pin'] ?? 
                   $input['source']['voucher_pin'] ?? 
+                  $input['asset_fields']['pin'] ??
+                  $input['asset_fields']['voucher_pin'] ??
                   null;
     
     // ============================================================
-    // AUTO-DETECT ASSET TYPE (mirrors verify_asset.php)
+    // AUTO-DETECT ASSET TYPE (mirrors verify_asset_zurubank.php)
     // ============================================================
     if (empty($assetType)) {
         if ($voucherNumber) {
             $assetType = 'VOUCHER';
-            error_log("Auto-detected asset type: VOUCHER from voucher_number");
+            error_log("ZURUBANK HOLD: Auto-detected asset type: VOUCHER from voucher_number");
         } elseif ($accountNumber) {
             $assetType = 'ACCOUNT';
-            error_log("Auto-detected asset type: ACCOUNT from account_number");
+            error_log("ZURUBANK HOLD: Auto-detected asset type: ACCOUNT from account_number");
         } elseif ($phone) {
             $assetType = 'WALLET';
-            error_log("Auto-detected asset type: WALLET from phone");
+            error_log("ZURUBANK HOLD: Auto-detected asset type: WALLET from phone");
         } else {
             throw new Exception("Could not determine asset type");
         }
@@ -173,7 +176,7 @@ try {
     // ============================================================
     if ($assetType === 'VOUCHER' || $assetType === 'CASHOUT-VOUCHER') {
         if (!$voucherNumber) {
-            error_log("Voucher number missing. Available fields: " . implode(', ', array_keys($input)));
+            error_log("ZURUBANK HOLD: Voucher number missing. Available fields: " . implode(', ', array_keys($input)));
             throw new Exception("Voucher number required. Available fields: " . implode(', ', array_keys($input)));
         }
 
@@ -289,7 +292,7 @@ try {
         }
 
     // ============================================================
-    // ACCOUNT HANDLING - FIXED: Use balance directly (same as verify_asset)
+    // ACCOUNT HANDLING
     // ============================================================
     } elseif ($assetType === 'ACCOUNT') {
         if (!$accountNumber) {
@@ -340,7 +343,6 @@ try {
                 )
             ");
 
-            // FIX: Use balance directly (same as verify_asset)
             $balance = floatval($account['balance'] ?? 0);
             
             error_log("ZURUBANK HOLD: Account balance: $balance, Requested: $amount");
