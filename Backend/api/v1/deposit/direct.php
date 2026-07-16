@@ -278,7 +278,7 @@ try {
         'severity' => 'info',
         'old_value' => json_encode(['balance' => $oldBalance, 'currency' => $currency]),
         'new_value' => json_encode(['balance' => $newBalance, 'amount' => $amount, 'currency' => $currency]),
-        'performed_by' => $requester,
+        'performed_by' => $userId,
         'ip_address' => $ipAddress,
         'user_agent' => $userAgent,
         'geo_location' => null
