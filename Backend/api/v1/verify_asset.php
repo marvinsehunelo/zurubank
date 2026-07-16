@@ -278,7 +278,7 @@ try {
     // ============================================================
     $pdo->beginTransaction();
 
-    // FIXED: Removed is_on_hold column - check hold_reference instead
+    // REMOVED: is_on_hold and hold_reference (columns don't exist)
     $stmt = $pdo->prepare("
         SELECT 
             voucher_id,
@@ -300,7 +300,6 @@ try {
             external_reference,
             source_institution,
             source_hold_reference,
-            hold_reference,
             access_token,
             source_reference
         FROM instant_money_vouchers
@@ -334,7 +333,6 @@ try {
                 external_reference,
                 source_institution,
                 source_hold_reference,
-                hold_reference,
                 access_token,
                 source_reference
             FROM instant_money_vouchers
@@ -364,10 +362,7 @@ try {
         }
     }
 
-    // FIXED: Check hold_reference instead of is_on_hold
-    if (!empty($voucher['hold_reference'])) {
-        throw new Exception("Voucher is on hold. Hold reference: {$voucher['hold_reference']}");
-    }
+    // Removed hold_reference check since column doesn't exist
 
     // ============================================================
     // PIN IS OPTIONAL FOR VOUCHER - Check if provided
@@ -382,13 +377,11 @@ try {
                 error_log("verify_asset: Voucher PIN verified");
             } else {
                 error_log("verify_asset: Voucher PIN invalid - proceeding with voucher verification only");
-                // Don't fail - PIN is optional
             }
         } else {
             error_log("verify_asset: No PIN provided for voucher - proceeding without PIN");
         }
     } else {
-        // Voucher has no PIN set - that's fine
         error_log("verify_asset: Voucher has no PIN set - proceeding");
     }
 
@@ -444,7 +437,7 @@ try {
         "holder_name" => $holderName,
         "recipient_phone" => $voucher['recipient_phone'],
         "expiry_date" => $voucher['voucher_expires_at'],
-        "is_on_hold" => !empty($voucher['hold_reference']),
+        "is_on_hold" => false,
         "auth_method" => $authMethod,
         "pin_verified" => $pinVerified,
         "metadata" => [
@@ -455,7 +448,6 @@ try {
             "created_at" => $voucher['created_at'],
             "external_reference" => $voucher['external_reference'],
             "source_institution" => $voucher['source_institution'],
-            "hold_reference" => $voucher['hold_reference'],
             "is_hooked" => $isHooked,
             "source_reference" => $sourceReference
         ]
