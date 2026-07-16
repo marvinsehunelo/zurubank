@@ -1,8 +1,8 @@
 <?php
 // --------------------------------------------------
 // notify_debit.php
-// Release held voucher and record interbank settlement
-// UPDATED: Certificate-based verification (Visa/Mastercard model)i
+// Release held funds and record interbank settlement
+// UPDATED: Certificate-based verification + ACCOUNT/VOUCHER branch
 // --------------------------------------------------
 
 header('Content-Type: application/json');
@@ -86,7 +86,124 @@ if (!$holdReference || !$amount) {
 try {
     $pdo->beginTransaction();
 
-    // First, find the voucher by source_hold_reference (this is where the hold_reference is stored)
+    // ============================================================
+    // BRANCH 1: Try to find as ACCOUNT hold first
+    // ============================================================
+    $stmt = $pdo->prepare("
+        SELECT id, account_id, amount, status, asset_type
+        FROM financial_holds
+        WHERE hold_reference = :hold_reference
+        AND status = 'HELD'
+        FOR UPDATE
+    ");
+    $stmt->execute(['hold_reference' => $holdReference]);
+    $accountHold = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    if ($accountHold) {
+        // ============================================================
+        // ACCOUNT DEBIT PATH
+        // ============================================================
+        error_log("ZURUBANK NOTIFY_DEBIT: Found ACCOUNT hold ID={$accountHold['id']}, account_id={$accountHold['account_id']}");
+
+        if (abs(floatval($accountHold['amount']) - floatval($amount)) > 0.01) {
+            throw new Exception("Amount mismatch. Hold: {$accountHold['amount']}, Requested: $amount");
+        }
+
+        // Debit the account
+        $stmt = $pdo->prepare("
+            UPDATE accounts
+            SET balance = balance - :amount,
+                held_balance = GREATEST(COALESCE(held_balance, 0) - :amount, 0)
+            WHERE account_id = :account_id
+            AND balance >= :amount
+            RETURNING balance, held_balance
+        ");
+        $stmt->execute([
+            'amount' => $amount,
+            'account_id' => $accountHold['account_id']
+        ]);
+        $updatedAccount = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if (!$updatedAccount) {
+            throw new Exception("Insufficient balance for account debit");
+        }
+
+        // Update hold status
+        $stmt = $pdo->prepare("
+            UPDATE financial_holds
+            SET status = 'DEBITED', 
+                debited_at = NOW(),
+                debited_by = :requester,
+                debit_signature_verified = :sig_verified
+            WHERE id = :hold_id
+        ");
+        $stmt->execute([
+            'hold_id' => $accountHold['id'],
+            'requester' => $requester,
+            'sig_verified' => $isValid ? 1 : 0
+        ]);
+
+        // Record in audit
+        $stmt = $pdo->prepare("
+            INSERT INTO audit_logs 
+            (entity_type, entity_id, action, category, severity, performed_by, 
+             performed_by_cert_verified, verification_method, metadata, performed_at)
+            VALUES 
+            ('financial_holds', :entity_id, 'DEBIT', 'financial', 'info', :performed_by,
+             :cert_verified, :verification_method, :metadata, NOW())
+        ");
+        $stmt->execute([
+            'entity_id' => $accountHold['id'],
+            'performed_by' => $requester,
+            'cert_verified' => $isValid ? 1 : 0,
+            'verification_method' => 'certificate',
+            'metadata' => json_encode([
+                'signature_verified' => $isValid,
+                'settlement_reference' => $settlementReference,
+                'hold_reference' => $holdReference,
+                'amount' => $amount,
+                'account_id' => $accountHold['account_id'],
+                'counterparty_bank' => $counterpartyBank
+            ])
+        ]);
+
+        $pdo->commit();
+
+        error_log("ZURUBANK NOTIFY_DEBIT: ACCOUNT debit completed - account_id={$accountHold['account_id']}, amount={$amount}");
+
+        $responsePayload = [
+            "success" => true,
+            "status" => "SUCCESS",
+            "debited" => true,
+            "message" => "Account debited successfully",
+            "hold_reference" => $holdReference,
+            "amount" => (float)$amount,
+            "asset_type" => "ACCOUNT",
+            "account_id" => $accountHold['account_id'],
+            "total_balance" => floatval($updatedAccount['balance']),
+            "held_balance" => floatval($updatedAccount['held_balance'] ?? 0),
+            "available_balance" => floatval($updatedAccount['balance']) - floatval($updatedAccount['held_balance'] ?? 0),
+            "requester" => $requester,
+            "signature_verified" => $isValid,
+            "verification_method" => "certificate",
+            "timestamp" => time(),
+            "data" => [
+                "debited" => true,
+                "transaction_reference" => $settlementReference,
+                "hold_reference" => $holdReference
+            ]
+        ];
+
+        send_signed_response($responsePayload);
+        exit;
+    }
+
+    // ============================================================
+    // BRANCH 2: VOUCHER DEBIT PATH (existing logic)
+    // ============================================================
+    error_log("ZURUBANK NOTIFY_DEBIT: No ACCOUNT hold found, trying VOUCHER path");
+
+    // First, find the voucher by source_hold_reference
     $stmt = $pdo->prepare("
         SELECT voucher_id, voucher_number, amount, status, holding_account, created_by,
                external_reference, source_institution, source_hold_reference,
@@ -279,10 +396,10 @@ try {
 
     $pdo->commit();
 
-    error_log("ZURUBANK NOTIFY_DEBIT: Debit completed - Voucher: {$voucher['voucher_number']}, Settlement: {$settlementReference}");
+    error_log("ZURUBANK NOTIFY_DEBIT: VOUCHER debit completed - Voucher: {$voucher['voucher_number']}, Settlement: {$settlementReference}");
 
     // ============================================================
-    // SEND SIGNED RESPONSE WITH CERTIFICATE
+    // VOUCHER RESPONSE
     // ============================================================
     $responsePayload = [
         "success" => true,
@@ -293,6 +410,7 @@ try {
         "hold_reference" => $holdReference,
         "amount" => (float)$amount,
         "currency" => $voucher['currency'] ?? 'BWP',
+        "asset_type" => "VOUCHER",
         "counterparty_bank" => $counterpartyBank,
         "settlement_reference" => $settlementReference,
         "journal_id" => $journalId,
