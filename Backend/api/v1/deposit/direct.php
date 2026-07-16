@@ -125,22 +125,21 @@ try {
 
     $pdo->beginTransaction();
 
-    // Lock and get account
+    // Lock and get account - FIXED: Only use account_number without alt
     $stmt = $pdo->prepare("
         SELECT account_id, user_id, balance, currency, account_number 
         FROM accounts 
-        WHERE account_number = :account_number OR account_number = :account_number_alt
+        WHERE account_number = :account_number
         FOR UPDATE
     ");
-    $stmt->execute([
-        'account_number' => $destinationAccount,
-        'account_number_alt' => ltrim($destinationAccount, '0')
-    ]);
+    $stmt->execute(['account_number' => $destinationAccount]);
     $account = $stmt->fetch(PDO::FETCH_ASSOC);
 
     if (!$account) {
         throw new Exception("Account not found: {$destinationAccount}");
     }
+
+    error_log("ZURUBANK DEPOSIT: Account data: " . json_encode($account));
 
     // Check currency match
     if ($account['currency'] !== $currency) {
@@ -167,33 +166,29 @@ try {
     $trace = 'DEP_' . time() . '_' . rand(100, 999) . '_' . substr(md5($reference), 0, 6);
 
     // ============================================================
-    // FIX: Get valid user_id for the transaction
+    // FIX: Get user_id directly from the account record
     // ============================================================
     $userId = $account['user_id'] ?? null;
     
-    // If user_id is not a valid integer, try to find one
+    // Ensure user_id is a valid integer
     if (!is_numeric($userId) || $userId <= 0) {
-        // Try to find user by account
-        $userStmt = $pdo->prepare("
-            SELECT u.user_id FROM users u
-            JOIN accounts a ON u.user_id = a.user_id
-            WHERE a.account_number = :account_number
-            LIMIT 1
-        ");
-        $userStmt->execute(['account_number' => $destinationAccount]);
-        $user = $userStmt->fetch(PDO::FETCH_ASSOC);
-        if ($user && isset($user['user_id'])) {
-            $userId = (int)$user['user_id'];
+        // If user_id is NULL or invalid, use the account_identifier as fallback
+        if (is_numeric($destinationAccount) && $destinationAccount > 0) {
+            $checkStmt = $pdo->prepare("SELECT 1 FROM users WHERE user_id = :user_id LIMIT 1");
+            $checkStmt->execute(['user_id' => (int)$destinationAccount]);
+            if ($checkStmt->fetchColumn()) {
+                $userId = (int)$destinationAccount;
+            } else {
+                // Fallback to first user
+                $fallbackStmt = $pdo->query("SELECT user_id FROM users LIMIT 1");
+                $fallback = $fallbackStmt->fetch(PDO::FETCH_ASSOC);
+                $userId = $fallback ? (int)$fallback['user_id'] : 1;
+            }
         } else {
-            // Fallback: try to find any valid user
+            // Fallback to first user
             $fallbackStmt = $pdo->query("SELECT user_id FROM users LIMIT 1");
             $fallback = $fallbackStmt->fetch(PDO::FETCH_ASSOC);
-            if ($fallback) {
-                $userId = (int)$fallback['user_id'];
-            } else {
-                // If no users exist, use 0
-                $userId = 0;
-            }
+            $userId = $fallback ? (int)$fallback['user_id'] : 1;
         }
     } else {
         $userId = (int)$userId;
@@ -201,7 +196,7 @@ try {
     
     error_log("ZURUBANK DEPOSIT: Using user_id: {$userId} for account: {$destinationAccount}");
 
-    // Insert into transactions table - FIXED with proper user_id
+    // Insert into transactions table
     $transStmt = $pdo->prepare("
         INSERT INTO transactions
         (user_id, account_id, from_account, to_account,
@@ -217,7 +212,7 @@ try {
         'to_account' => $destinationAccount,
         'amount' => $amount,
         'reference' => $reference,
-        'description' => "Deposit from {$sourceInstitution} (verified by {$requester})",
+        'description' => "Deposit from {$sourceInstitution}",
         'trace_number' => $trace
     ]);
 
@@ -246,10 +241,6 @@ try {
     // ============================================================
     // AUDIT LOG - EXACTLY MATCHING YOUR TABLE STRUCTURE
     // ============================================================
-    // audit_logs: id, entity, entity_id, action, category, severity, 
-    // old_value, new_value, performed_at, performed_by, ip_address, 
-    // user_agent, geo_location
-    
     $pdo->exec("
         CREATE TABLE IF NOT EXISTS audit_logs (
             id SERIAL PRIMARY KEY,
