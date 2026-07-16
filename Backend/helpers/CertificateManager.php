@@ -254,7 +254,7 @@ public function createSignedRequest(array $payload, string $requester): array
         
         // Emergency repair - extract and rebuild again
         $base64Content = preg_replace('/-----BEGIN PRIVATE KEY-----/', '', $this->myPrivateKey);
-        $base64Content = preg_replace('/-----END PRIVATE KEY-----/', '', $base64Content);
+        $base64Content = preg_replace('/-----END PRIVATE KEY-----/', '', $this->myPrivateKey);
         $base64Content = preg_replace('/[^A-Za-z0-9+\/=]/', '', $base64Content);
         
         error_log("Emergency repair - Base64 length: " . strlen($base64Content));
