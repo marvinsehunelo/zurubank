@@ -1,6 +1,7 @@
 <?php 
 /**
  * /Backend/api/v1/verify_asset_zurubank.php
+ * FIXED: Handles destination_asset_type, account_identifier, and VERIFY_ACCOUNT action
  */
 
 require_once __DIR__ . '/../../config/db.php';
@@ -25,12 +26,25 @@ $input = json_decode(file_get_contents("php://input"), true);
 
 error_log("Parsed input: " . json_encode($input));
 
+// ============================================================
+// FIX 1: Support destination_asset_type for account verification
+// ============================================================
 $assetType = strtoupper(
     $input['asset_type'] ?? 
+    $input['destination_asset_type'] ??   // <-- ADDED
     $input['type'] ?? 
     $input['source']['asset_type'] ?? 
     ''
 );
+
+// ============================================================
+// FIX 2: Support VERIFY_ACCOUNT action
+// ============================================================
+$action = strtoupper($input['action'] ?? 'VERIFY_ASSET');
+if ($action === 'VERIFY_ACCOUNT' && empty($assetType)) {
+    $assetType = 'ACCOUNT';
+    error_log("verify_asset: VERIFY_ACCOUNT action detected, setting asset_type=ACCOUNT");
+}
 
 $pin = $input['pin'] ?? 
        $input['wallet_pin'] ?? 
@@ -75,7 +89,12 @@ $voucherPin = $input['voucher_pin'] ??
               $input['source']['pin'] ??
               null;
 
+// ============================================================
+// FIX 3: Support account_identifier from VouchMorph payload
+// ============================================================
 $accountNumber = $input['source_identifier'] ?? 
+                 $input['account_identifier'] ??          // <-- ADDED
+                 $input['destination_identifier'] ??      // <-- ADDED
                  $input['account_number'] ?? 
                  $input['source']['account_number'] ??
                  $input['source']['identifier'] ??
