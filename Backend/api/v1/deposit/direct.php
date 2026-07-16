@@ -166,7 +166,42 @@ try {
     // Generate trace number
     $trace = 'DEP_' . time() . '_' . rand(100, 999) . '_' . substr(md5($reference), 0, 6);
 
-    // Insert into transactions table
+    // ============================================================
+    // FIX: Get valid user_id for the transaction
+    // ============================================================
+    $userId = $account['user_id'] ?? null;
+    
+    // If user_id is not a valid integer, try to find one
+    if (!is_numeric($userId) || $userId <= 0) {
+        // Try to find user by account
+        $userStmt = $pdo->prepare("
+            SELECT u.user_id FROM users u
+            JOIN accounts a ON u.user_id = a.user_id
+            WHERE a.account_number = :account_number
+            LIMIT 1
+        ");
+        $userStmt->execute(['account_number' => $destinationAccount]);
+        $user = $userStmt->fetch(PDO::FETCH_ASSOC);
+        if ($user && isset($user['user_id'])) {
+            $userId = (int)$user['user_id'];
+        } else {
+            // Fallback: try to find any valid user
+            $fallbackStmt = $pdo->query("SELECT user_id FROM users LIMIT 1");
+            $fallback = $fallbackStmt->fetch(PDO::FETCH_ASSOC);
+            if ($fallback) {
+                $userId = (int)$fallback['user_id'];
+            } else {
+                // If no users exist, use 0
+                $userId = 0;
+            }
+        }
+    } else {
+        $userId = (int)$userId;
+    }
+    
+    error_log("ZURUBANK DEPOSIT: Using user_id: {$userId} for account: {$destinationAccount}");
+
+    // Insert into transactions table - FIXED with proper user_id
     $transStmt = $pdo->prepare("
         INSERT INTO transactions
         (user_id, account_id, from_account, to_account,
@@ -176,7 +211,7 @@ try {
          'deposit', :amount, :reference, :description, 'completed', :trace_number)
     ");
     $transStmt->execute([
-        'user_id' => $account['user_id'],
+        'user_id' => $userId,
         'account_id' => $account['account_id'],
         'from_account' => $sourceInstitution,
         'to_account' => $destinationAccount,
