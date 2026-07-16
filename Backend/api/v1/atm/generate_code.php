@@ -76,12 +76,17 @@ try {
     $currency = trim((string)($input['currency'] ?? 'BWP'));
     $reference = trim((string)($input['reference'] ?? ''));
     
+    // ============================================================
+    // FIX: Get source institution and hold reference correctly
+    // source_hold array contains {payload, signature, source, timestamp, is_hooked}
+    // The hold_reference is a top-level field, NOT inside source_hold
+    // ============================================================
     $sourceInstitution = null;
     $sourceHoldReference = null;
 
+    // Get source institution from source_hold or top-level
     if (isset($input['source_hold']) && is_array($input['source_hold'])) {
         $sourceInstitution = $input['source_hold']['source'] ?? null;
-        $sourceHoldReference = $input['source_hold']['hold_reference'] ?? $input['source_hold']['reference'] ?? null;
     }
 
     if (empty($sourceInstitution)) {
@@ -89,14 +94,12 @@ try {
     } else {
         $sourceInstitution = trim((string)$sourceInstitution);
     }
-    
-    if (empty($sourceHoldReference)) {
-        $sourceHoldReference = trim((string)($input['source_hold_reference'] ?? ''));
-        if ($sourceHoldReference === '') {
-            $sourceHoldReference = null;
-        }
-    } else {
-        $sourceHoldReference = trim((string)$sourceHoldReference);
+
+    // Get hold reference from top-level fields, NOT from source_hold
+    // The hold reference is sent as a top-level field by SwapService
+    $sourceHoldReference = trim((string)($input['hold_reference'] ?? $input['source_hold_reference'] ?? $input['reference'] ?? ''));
+    if ($sourceHoldReference === '') {
+        $sourceHoldReference = null;
     }
 
     $origin = 'swap';
