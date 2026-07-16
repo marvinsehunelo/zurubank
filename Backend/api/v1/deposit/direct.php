@@ -2,7 +2,7 @@
 /**
  * ZURUBANK Direct Deposit - Compatible with SwapService
  * UPDATED: Certificate-based verification (Visa/Mastercard model)
- * FIXED: Removed requester column (doesn't exist in transactions table)
+ * FIXED: Correct audit_logs table structure matching your schema
  */
 
 header('Content-Type: application/json');
@@ -62,6 +62,10 @@ $amount = (float)($input['amount'] ?? 0);
 $action = $input['action'] ?? 'PROCESS_DEPOSIT';
 $currency = $input['currency'] ?? 'BWP';
 $idempotencyKey = $input['idempotency_key'] ?? $input['idempotencyKey'] ?? null;
+
+// Get client IP and user agent for audit
+$ipAddress = $_SERVER['REMOTE_ADDR'] ?? $_SERVER['HTTP_X_FORWARDED_FOR'] ?? null;
+$userAgent = $_SERVER['HTTP_USER_AGENT'] ?? null;
 
 if (!$destinationAccount || $amount <= 0) {
     error_log("ZURUBANK DEPOSIT: Missing required fields - account: {$destinationAccount}, amount: {$amount}");
@@ -162,11 +166,7 @@ try {
     // Generate trace number
     $trace = 'DEP_' . time() . '_' . rand(100, 999) . '_' . substr(md5($reference), 0, 6);
 
-    // FIX: Only use columns that exist in transactions table
-    // transaction_id, user_id, account_id, from_account, to_account, type, amount, 
-    // reference, description, status, created_at, swap_fee, creation_fee, admin_fee, 
-    // sms_fee, rounding_adjustment, is_deleted, is_large_transaction, is_suspicious, 
-    // reported_to_regulator, regulator_report_reference, trace_number
+    // Insert into transactions table
     $transStmt = $pdo->prepare("
         INSERT INTO transactions
         (user_id, account_id, from_account, to_account,
@@ -208,47 +208,54 @@ try {
         ]);
     }
 
-    // Create audit logs table if needed
+    // ============================================================
+    // AUDIT LOG - EXACTLY MATCHING YOUR TABLE STRUCTURE
+    // ============================================================
+    // audit_logs: id, entity, entity_id, action, category, severity, 
+    // old_value, new_value, performed_at, performed_by, ip_address, 
+    // user_agent, geo_location
+    
     $pdo->exec("
         CREATE TABLE IF NOT EXISTS audit_logs (
             id SERIAL PRIMARY KEY,
-            entity_type VARCHAR(50),
+            entity VARCHAR(50),
             entity_id INTEGER,
             action VARCHAR(50),
             category VARCHAR(50),
             severity VARCHAR(20),
-            performed_by VARCHAR(100),
-            performed_by_cert_verified BOOLEAN DEFAULT FALSE,
-            verification_method VARCHAR(50),
             old_value JSONB,
             new_value JSONB,
-            metadata JSONB,
-            performed_at TIMESTAMP DEFAULT NOW()
+            performed_at TIMESTAMP DEFAULT NOW(),
+            performed_by VARCHAR(100),
+            ip_address VARCHAR(45),
+            user_agent TEXT,
+            geo_location VARCHAR(100)
         )
     ");
 
-    // Audit log
     $auditStmt = $pdo->prepare("
         INSERT INTO audit_logs 
-        (entity_type, entity_id, action, category, severity, performed_by, 
-         performed_by_cert_verified, verification_method, old_value, new_value, metadata, performed_at)
+        (entity, entity_id, action, category, severity, 
+         old_value, new_value, performed_at, performed_by, 
+         ip_address, user_agent, geo_location)
         VALUES 
-        ('accounts', :entity_id, 'DEPOSIT', 'financial', 'info', :performed_by,
-         :cert_verified, :verification_method, :old_value, :new_value, :metadata, NOW())
+        (:entity, :entity_id, :action, :category, :severity,
+         :old_value, :new_value, NOW(), :performed_by,
+         :ip_address, :user_agent, :geo_location)
     ");
+    
     $auditStmt->execute([
+        'entity' => 'accounts',
         'entity_id' => $account['account_id'],
+        'action' => 'DEPOSIT',
+        'category' => 'financial',
+        'severity' => 'info',
+        'old_value' => json_encode(['balance' => $oldBalance, 'currency' => $currency]),
+        'new_value' => json_encode(['balance' => $newBalance, 'amount' => $amount, 'currency' => $currency]),
         'performed_by' => $requester,
-        'cert_verified' => $isValid ? 1 : 0,
-        'verification_method' => 'certificate',
-        'old_value' => json_encode(['balance' => $oldBalance]),
-        'new_value' => json_encode(['balance' => $newBalance, 'amount' => $amount]),
-        'metadata' => json_encode([
-            'signature_verified' => $isValid,
-            'reference' => $reference,
-            'trace' => $trace,
-            'source_institution' => $sourceInstitution
-        ])
+        'ip_address' => $ipAddress,
+        'user_agent' => $userAgent,
+        'geo_location' => null
     ]);
 
     $pdo->commit();
@@ -297,3 +304,4 @@ try {
         'timestamp' => time()
     ]);
 }
+?>
