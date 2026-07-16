@@ -134,7 +134,6 @@ try {
                 balance,
                 currency,
                 status,
-                is_frozen,
                 holder_name,
                 created_at
             FROM accounts
@@ -150,10 +149,6 @@ try {
 
         if ($account['status'] !== 'active') {
             throw new Exception("Account is not active (status: {$account['status']})");
-        }
-
-        if ($account['is_frozen'] == true) {
-            throw new Exception("Account is frozen");
         }
 
         $availableBalance = floatval($account['balance']);
@@ -217,7 +212,6 @@ try {
             "account_type" => $account['account_type'],
             "auth_method" => $authMethod,
             "pin_verified" => $pinVerified,
-            "is_frozen" => $account['is_frozen'] == true,
             "metadata" => [
                 "account_id" => $account['account_id'],
                 "user_id" => $account['user_id'],
