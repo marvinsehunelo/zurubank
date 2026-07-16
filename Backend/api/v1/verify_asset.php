@@ -379,7 +379,7 @@ try {
         "holder_name" => $holderName,
         "recipient_phone" => $voucher['recipient_phone'],
         "expiry_date" => $voucher['voucher_expires_at'],
-        "is_on_hold" => false,
+        "status" => $voucher['status'],
         "auth_method" => $authMethod,
         "pin_verified" => $pinVerified,
         "metadata" => [
