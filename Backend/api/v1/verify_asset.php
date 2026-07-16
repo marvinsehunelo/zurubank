@@ -1,8 +1,6 @@
 <?php 
 /**
  * /Backend/api/v1/verify_asset_zurubank.php
- * UPDATED - PIN is OPTIONAL for ALL asset types (ACCOUNT, VOUCHER, CASHOUT-VOUCHER)
- * Supports alternative authentication: access_token, source_reference, hooked sources
  */
 
 require_once __DIR__ . '/../../config/db.php';
@@ -13,9 +11,6 @@ header("Content-Type: application/json");
 error_log("=== ZURUBANK verify_asset.php CALLED ===");
 error_log("RAW POST: " . file_get_contents("php://input"));
 
-// -------------------------
-// 1. Method Guard
-// -------------------------
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     http_response_code(405);
     echo json_encode([
@@ -26,9 +21,6 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     exit;
 }
 
-// -------------------------
-// 2. Read Input
-// -------------------------
 $input = json_decode(file_get_contents("php://input"), true);
 
 error_log("Parsed input: " . json_encode($input));
@@ -40,10 +32,6 @@ $assetType = strtoupper(
     ''
 );
 
-// ============================================================
-// DETECT AUTHENTICATION METHOD
-// PIN is OPTIONAL for ALL asset types
-// ============================================================
 $pin = $input['pin'] ?? 
        $input['wallet_pin'] ?? 
        $input['atm_pin'] ?? 
@@ -57,7 +45,6 @@ $pin = $input['pin'] ??
        $input['source']['pin'] ?? 
        null;
 
-// Alternative authentication methods
 $accessToken = $input['access_token'] ?? null;
 $sourceReference = $input['source_reference'] ?? null;
 $isHooked = isset($input['_is_hooked']) && $input['_is_hooked'] === true;
@@ -67,9 +54,6 @@ error_log("verify_asset: Auth methods - PIN: " . ($pin ? 'present' : 'null') .
           ", SourceRef: " . ($sourceReference ? 'present' : 'null') . 
           ", IsHooked: " . ($isHooked ? 'true' : 'false'));
 
-// ============================================================
-// FIX: Check for voucher_number in MULTIPLE locations
-// ============================================================
 $voucherNumber = $input['voucher_number'] ?? 
                  $input['voucher'] ?? 
                  $input['voucherNumber'] ?? 
@@ -106,10 +90,6 @@ $claimantPhone = $input['claimant_phone'] ??
 $amount = floatval($input['amount'] ?? $input['value'] ?? 0);
 $reference = $input['reference'] ?? $input['transaction_reference'] ?? null;
 
-// ============================================================
-// FIXED: If asset_type is VOUCHER but voucher_number is missing,
-// use source_identifier as the voucher number - NO LENGTH RESTRICTION
-// ============================================================
 if (($assetType === 'VOUCHER' || $assetType === 'CASHOUT-VOUCHER') && empty($voucherNumber)) {
     if (!empty($accountNumber)) {
         $voucherNumber = trim($accountNumber);
@@ -119,7 +99,6 @@ if (($assetType === 'VOUCHER' || $assetType === 'CASHOUT-VOUCHER') && empty($vou
 
 error_log("Normalized - Type: $assetType, Voucher: $voucherNumber, Account: $accountNumber, Phone: $claimantPhone, Amount: $amount");
 
-// ZURUBANK SUPPORTS VOUCHER, CASHOUT-VOUCHER, AND ACCOUNT
 if ($assetType !== 'VOUCHER' && $assetType !== 'CASHOUT-VOUCHER' && $assetType !== 'ACCOUNT') {
     error_log("ERROR: Unsupported asset type for ZURUBANK: $assetType");
     echo json_encode([
@@ -139,9 +118,6 @@ try {
         throw new Exception("Database connection failed to initialize.");
     }
 
-    // ============================================================
-    // HANDLE ACCOUNT TYPE (PIN OPTIONAL)
-    // ============================================================
     if ($assetType === 'ACCOUNT') {
         error_log("Processing ACCOUNT verification for: $accountNumber");
         
@@ -149,7 +125,6 @@ try {
             throw new Exception("Account number required for ACCOUNT asset type");
         }
 
-        // Query the accounts table
         $stmt = $pdo->prepare("
             SELECT 
                 account_id,
@@ -183,19 +158,14 @@ try {
 
         $availableBalance = floatval($account['balance']);
         
-        // Check if sufficient balance
         if ($amount > 0 && $availableBalance < $amount) {
             throw new Exception("Insufficient balance. Available: $availableBalance, Requested: $amount");
         }
 
-        // ============================================================
-        // PIN IS OPTIONAL FOR ACCOUNT - Check if provided
-        // ============================================================
         $pinVerified = false;
         if ($pin) {
             error_log("verify_asset: Optional PIN provided for account: " . substr($pin, -4));
             
-            // Verify PIN against account or ewallet_pins
             $pinStmt = $pdo->prepare("
                 SELECT id, pin, amount, is_redeemed, hold_status
                 FROM ewallet_pins 
@@ -213,7 +183,6 @@ try {
             }
         }
 
-        // Get holder name
         $holderName = $account['holder_name'] ?? "Account Holder";
         if ($account['user_id']) {
             $userStmt = $pdo->prepare("SELECT full_name FROM users WHERE user_id = ?");
@@ -224,7 +193,6 @@ try {
             }
         }
 
-        // Determine auth method
         $authMethod = 'account_only';
         if ($pinVerified) {
             $authMethod = 'account_pin';
@@ -264,21 +232,13 @@ try {
         exit;
     }
 
-    // ============================================================
-    // HANDLE VOUCHER AND CASHOUT-VOUCHER TYPE (PIN OPTIONAL)
-    // ============================================================
     if (empty($voucherNumber)) {
-        // Log all fields to debug
         error_log("Voucher number missing. Available fields: " . implode(', ', array_keys($input)));
         throw new Exception("Voucher number required. Available fields: " . implode(', ', array_keys($input)));
     }
 
-    // ============================================================
-    // VOUCHER VERIFICATION - PIN IS OPTIONAL
-    // ============================================================
     $pdo->beginTransaction();
 
-    // REMOVED: is_on_hold and hold_reference (columns don't exist)
     $stmt = $pdo->prepare("
         SELECT 
             voucher_id,
@@ -299,9 +259,7 @@ try {
             sat_expires_at,
             external_reference,
             source_institution,
-            source_hold_reference,
-            access_token,
-            source_reference
+            source_hold_reference
         FROM instant_money_vouchers
         WHERE voucher_number = :voucher_number
         LIMIT 1
@@ -311,7 +269,6 @@ try {
     $voucher = $stmt->fetch(PDO::FETCH_ASSOC);
 
     if (!$voucher) {
-        // Try with trim
         $stmt = $pdo->prepare("
             SELECT 
                 voucher_id,
@@ -332,9 +289,7 @@ try {
                 sat_expires_at,
                 external_reference,
                 source_institution,
-                source_hold_reference,
-                access_token,
-                source_reference
+                source_hold_reference
             FROM instant_money_vouchers
             WHERE TRIM(voucher_number) = TRIM(:voucher_number)
             LIMIT 1
@@ -362,11 +317,6 @@ try {
         }
     }
 
-    // Removed hold_reference check since column doesn't exist
-
-    // ============================================================
-    // PIN IS OPTIONAL FOR VOUCHER - Check if provided
-    // ============================================================
     $pinVerified = false;
     
     if ($voucher['voucher_pin']) {
@@ -385,22 +335,14 @@ try {
         error_log("verify_asset: Voucher has no PIN set - proceeding");
     }
 
-    // Check alternative authentication methods
     $authMethod = 'voucher_only';
     if ($pinVerified) {
         $authMethod = 'voucher_pin';
-    } elseif ($accessToken && $voucher['access_token'] === $accessToken) {
-        $authMethod = 'voucher_token';
-        error_log("verify_asset: Voucher authenticated via access_token");
-    } elseif ($sourceReference && $voucher['source_reference'] === $sourceReference) {
-        $authMethod = 'voucher_source_ref';
-        error_log("verify_asset: Voucher authenticated via source_reference");
     } elseif ($isHooked) {
         $authMethod = 'voucher_hooked';
         error_log("verify_asset: Voucher authenticated via hooked source");
     }
 
-    // Check amount
     if ($amount > 0 && floatval($voucher['amount']) !== $amount) {
         throw new Exception("Voucher amount mismatch. Expected: {$voucher['amount']}, Requested: $amount");
     }
@@ -448,8 +390,7 @@ try {
             "created_at" => $voucher['created_at'],
             "external_reference" => $voucher['external_reference'],
             "source_institution" => $voucher['source_institution'],
-            "is_hooked" => $isHooked,
-            "source_reference" => $sourceReference
+            "is_hooked" => $isHooked
         ]
     ];
     
