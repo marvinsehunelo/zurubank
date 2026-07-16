@@ -2,6 +2,7 @@
 /**
  * ZURUBANK Direct Deposit - Compatible with SwapService
  * UPDATED: Certificate-based verification (Visa/Mastercard model)
+ * FIXED: Removed requester column (doesn't exist in transactions table)
  */
 
 header('Content-Type: application/json');
@@ -161,38 +162,18 @@ try {
     // Generate trace number
     $trace = 'DEP_' . time() . '_' . rand(100, 999) . '_' . substr(md5($reference), 0, 6);
 
-    // Create transactions table if needed
-    $pdo->exec("
-        CREATE TABLE IF NOT EXISTS transactions (
-            transaction_id SERIAL PRIMARY KEY,
-            user_id INTEGER,
-            account_id INTEGER,
-            from_account VARCHAR(100),
-            to_account VARCHAR(100),
-            type VARCHAR(50),
-            amount DECIMAL(20,4),
-            reference VARCHAR(255),
-            trace_number VARCHAR(100) UNIQUE,
-            status VARCHAR(50) DEFAULT 'completed',
-            requester VARCHAR(100),
-            signature_verified BOOLEAN DEFAULT FALSE,
-            verification_method VARCHAR(50),
-            notes TEXT,
-            created_at TIMESTAMP DEFAULT NOW(),
-            updated_at TIMESTAMP DEFAULT NOW()
-        )
-    ");
-
-    // Record transaction with signature info
+    // FIX: Only use columns that exist in transactions table
+    // transaction_id, user_id, account_id, from_account, to_account, type, amount, 
+    // reference, description, status, created_at, swap_fee, creation_fee, admin_fee, 
+    // sms_fee, rounding_adjustment, is_deleted, is_large_transaction, is_suspicious, 
+    // reported_to_regulator, regulator_report_reference, trace_number
     $transStmt = $pdo->prepare("
         INSERT INTO transactions
         (user_id, account_id, from_account, to_account,
-         type, amount, reference, trace_number, status, 
-         requester, signature_verified, verification_method, notes, created_at, updated_at)
+         type, amount, reference, description, status, trace_number)
         VALUES 
         (:user_id, :account_id, :from_account, :to_account,
-         'deposit', :amount, :reference, :trace_number, 'completed',
-         :requester, :sig_verified, :verification_method, :notes, NOW(), NOW())
+         'deposit', :amount, :reference, :description, 'completed', :trace_number)
     ");
     $transStmt->execute([
         'user_id' => $account['user_id'],
@@ -201,14 +182,8 @@ try {
         'to_account' => $destinationAccount,
         'amount' => $amount,
         'reference' => $reference,
-        'trace_number' => $trace,
-        'requester' => $requester,
-        'sig_verified' => $isValid ? 1 : 0,
-        'verification_method' => 'certificate',
-        'notes' => json_encode([
-            'source_hold_reference' => $sourceHoldReference,
-            'original_request' => $input
-        ])
+        'description' => "Deposit from {$sourceInstitution} (verified by {$requester})",
+        'trace_number' => $trace
     ]);
 
     // Store idempotency with signature info
