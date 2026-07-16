@@ -86,9 +86,14 @@ try {
     // ============================================================
     // SMART FALLBACK: If asset_type is VOUCHER but voucher_number is missing,
     // check if source_identifier is actually the voucher number
+    // Mirrors verify_asset_zurubank.php exactly - NO length restriction.
+    // (Previously required a 12-15 digit match here, which rejected
+    // shorter valid identifiers like "535400455" that verify_asset.php
+    // accepted without issue - causing verify to succeed and hold to
+    // fail on the very same identifier.)
     // ============================================================
     if (($assetType === 'VOUCHER' || $assetType === 'CASHOUT-VOUCHER') && empty($voucherNumber)) {
-        if (!empty($accountNumber) && preg_match('/^\d{12,15}$/', $accountNumber)) {
+        if (!empty($accountNumber)) {
             $voucherNumber = trim($accountNumber);
             error_log("ZURUBANK HOLD: Using source_identifier as voucher_number: $voucherNumber");
         }
@@ -105,12 +110,12 @@ try {
     }
     
     // ============================================================
-    // FINAL FALLBACK: Check any field that looks like a 12-15 digit number
-    // (copied from verify_asset_zurubank.php logic)
+    // FINAL FALLBACK: Check any field that looks like a number
+    // Loosened to match any numeric string (mirrors verify_asset_zurubank.php approach)
     // ============================================================
     if (empty($voucherNumber)) {
         foreach ($input as $key => $value) {
-            if (is_string($value) && preg_match('/^\d{12,15}$/', $value) && strlen($value) >= 12) {
+            if (is_string($value) && preg_match('/^\d+$/', $value) && strlen($value) >= 6) {
                 $voucherNumber = trim($value);
                 error_log("ZURUBANK HOLD: Auto-detected voucher_number from field '$key': $voucherNumber");
                 break;
