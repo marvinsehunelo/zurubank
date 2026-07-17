@@ -3,6 +3,7 @@
 // atm_cashout_voucher.php
 // ZuruBank ATM Voucher Cashout (Swap Origin Supported)
 // FIXED: Certificate verification with fallback for internal ATM terminals
+// FIXED: Correct column names for instant_money_vouchers table
 // --------------------------------------------------
 
 header('Content-Type: application/json');
@@ -319,9 +320,28 @@ try {
 
     // -------------------------
     // Fetch Voucher (FOR UPDATE prevents race condition)
+    // USING CORRECT COLUMN NAMES
     // -------------------------
     $stmt = $pdo->prepare("
-        SELECT * FROM instant_money_vouchers
+        SELECT 
+            voucher_id,
+            voucher_number,
+            voucher_pin,
+            amount,
+            currency,
+            status,
+            created_by,
+            recipient_phone,
+            voucher_created_at,
+            voucher_expires_at,
+            redeemed_at,
+            redeemed_by,
+            source_institution,
+            source_hold_reference,
+            reference,
+            source_asset_type,
+            holding_account
+        FROM instant_money_vouchers
         WHERE voucher_number = :voucher_number
         FOR UPDATE
     ");
@@ -340,7 +360,7 @@ try {
     }
 
     // Validate Status
-    $allowedStatuses = ['active', 'hold'];
+    $allowedStatuses = ['active', 'hold', 'pending'];
     if (!in_array($voucher['status'], $allowedStatuses)) {
         throw new Exception("Voucher cannot be cashed out (status: {$voucher['status']})");
     }
@@ -357,26 +377,24 @@ try {
 
     $amount = floatval($voucher['amount']);
 
-    // Mark Voucher as Redeemed
+    // ============================================================
+    // Mark Voucher as Redeemed (USING CORRECT COLUMN NAMES)
+    // ============================================================
     $update = $pdo->prepare("
         UPDATE instant_money_vouchers
         SET status = 'redeemed',
             redeemed_at = NOW(),
-            updated_at = NOW(),
-            redeemed_by = :requester,
-            redeemed_via = 'ATM',
-            redemption_signature_verified = :sig_verified,
-            redemption_verification_method = :verification_method
+            redeemed_by = :requester
         WHERE voucher_id = :voucher_id
     ");
     $update->execute([
         ':voucher_id' => $voucher['voucher_id'],
-        ':requester' => $requester,
-        ':sig_verified' => $isValid ? 1 : 0,
-        ':verification_method' => 'certificate'
+        ':requester' => $requester
     ]);
 
-    // Create Cashout Record
+    // ============================================================
+    // Create Cashout Record (USING CORRECT TABLE/COLUMN NAMES)
+    // ============================================================
     $cashoutReference = 'CASHOUT-' . time() . '-' . substr($voucherNumber, -6);
     
     // Ensure cashouts table has required columns
@@ -424,7 +442,7 @@ try {
             :destination_bank_id,
             :user_id,
             :amount,
-            'BWP',
+            :currency,
             'COMPLETED',
             :atm_id,
             :requester,
@@ -443,6 +461,7 @@ try {
         ':destination_bank_id' => 2,
         ':user_id' => $voucher['created_by'] ?? 1,
         ':amount' => $amount,
+        ':currency' => $voucher['currency'] ?? 'BWP',
         ':atm_id' => $atmId,
         ':requester' => $requester,
         ':sig_verified' => $isValid ? 1 : 0,
@@ -450,7 +469,9 @@ try {
     ]);
     $cashoutId = $insertCashout->fetchColumn();
 
+    // ============================================================
     // Insert ATM Dispense Record
+    // ============================================================
     $stmtCols = $pdo->query("SELECT column_name FROM information_schema.columns WHERE table_name = 'atm_dispenses'");
     $columns = $stmtCols->fetchAll(PDO::FETCH_COLUMN);
     
@@ -468,13 +489,14 @@ try {
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, 'BWP', 'DISPENSED', ?, ?, ?, NOW(), NOW())
+            VALUES (?, ?, ?, ?, 'DISPENSED', ?, ?, ?, NOW(), NOW())
             ON CONFLICT (trace_number) DO NOTHING
         ");
         $insert->execute([
             $atmId,
             $voucherNumber,
             $amount,
+            $voucher['currency'] ?? 'BWP',
             $requester,
             $isValid ? 1 : 0,
             'certificate'
@@ -505,7 +527,9 @@ try {
         ]);
     }
 
+    // ============================================================
     // Create Transaction Record
+    // ============================================================
     $stmtTx = $pdo->prepare("
         INSERT INTO transactions (
             user_id,
@@ -541,8 +565,8 @@ try {
 
     $stmtTx->execute([
         ':user_id' => $voucher['created_by'] ?? 1,
-        ':from_account' => 'VOUCHER-SUSPENSE',
-        ':to_account' => 'CASH',
+        ':from_account' => $voucher['holding_account'] ?? 'VOUCHER-SUSPENSE',
+        ':to_account' => 'ATM:' . $atmId,
         ':amount' => $amount,
         ':reference' => $voucherNumber,
         ':description' => "ATM cashout of voucher {$voucherNumber} at {$atmId} (authorized by {$requester})",
@@ -551,7 +575,9 @@ try {
         ':verification_method' => 'certificate'
     ]);
 
+    // ============================================================
     // Record in swap_ledger
+    // ============================================================
     $stmtLedger = $pdo->prepare("
         INSERT INTO swap_ledger (
             reference_id,
@@ -569,7 +595,7 @@ try {
             :debit_account,
             :credit_account,
             :amount,
-            'BWP',
+            :currency,
             :description,
             :requester,
             :sig_verified,
@@ -579,15 +605,18 @@ try {
 
     $stmtLedger->execute([
         ':reference_id' => $voucherNumber,
-        ':debit_account' => 'VOUCHER-SUSPENSE',
+        ':debit_account' => $voucher['holding_account'] ?? 'VOUCHER-SUSPENSE',
         ':credit_account' => 'ATM:' . $atmId,
         ':amount' => $amount,
+        ':currency' => $voucher['currency'] ?? 'BWP',
         ':description' => "ATM cashout settlement for voucher {$voucherNumber} (authorized by {$requester})",
         ':requester' => $requester,
         ':sig_verified' => $isValid ? 1 : 0
     ]);
 
+    // ============================================================
     // Audit Log
+    // ============================================================
     $auditStmt = $pdo->prepare("
         INSERT INTO audit_logs 
         (entity_type, entity_id, action, category, severity, performed_by, 
@@ -606,7 +635,10 @@ try {
             'amount' => $amount,
             'atm_id' => $atmId,
             'voucher_number' => $voucherNumber,
-            'cashout_id' => $cashoutId
+            'cashout_id' => $cashoutId,
+            'source_institution' => $voucher['source_institution'] ?? null,
+            'source_hold_reference' => $voucher['source_hold_reference'] ?? null,
+            'swap_reference' => $voucher['reference'] ?? null
         ])
     ]);
 
@@ -621,7 +653,7 @@ try {
         "status" => "CASHOUT_SUCCESS",
         "voucher_number" => $voucherNumber,
         "amount" => $amount,
-        "currency" => "BWP",
+        "currency" => $voucher['currency'] ?? 'BWP',
         "atm_id" => $atmId,
         "cashout_id" => $cashoutId,
         "cashout_reference" => $cashoutReference,
