@@ -2,41 +2,27 @@
 // --------------------------------------------------
 // atm_cashout_voucher.php
 // ZuruBank ATM Voucher Cashout (Swap Origin Supported)
-// FIXED: Certificate verification with fallback for internal ATM terminals
-// FIXED: Correct column names for instant_money_vouchers table
-// FIXED: redeemed_by now uses user_id instead of requester string
-// ADDED: VouchMorph notification after successful cashout
 // --------------------------------------------------
 
 header('Content-Type: application/json');
 ini_set('display_errors', 0);
 error_reporting(E_ALL);
 
-// Clear output buffers
 while (ob_get_level()) {
     ob_end_clean();
 }
-
-// ============================================================
-// CORRECTED PATHS
-// ============================================================
 
 $baseDir = dirname(__DIR__, 3);
 $configDir = $baseDir . '/config';
 $helpersDir = $baseDir . '/helpers';
 
-// Include database config
 $dbFile = $configDir . '/db.php';
 if (!file_exists($dbFile)) {
-    send_json_response([
-        'status' => 'ERROR',
-        'message' => 'Database config not found'
-    ]);
+    send_json_response(['status' => 'ERROR', 'message' => 'Database config not found']);
     exit;
 }
 require_once $dbFile;
 
-// Include helpers
 $cryptoFile = $helpersDir . '/crypto.php';
 if (file_exists($cryptoFile) && !function_exists('generate_signature')) {
     require_once $cryptoFile;
@@ -47,23 +33,14 @@ if (file_exists($responseFile) && !function_exists('json_response')) {
     require_once $responseFile;
 }
 
-// CertificateManager is MANDATORY
 $certFile = $helpersDir . '/CertificateManager.php';
 if (!file_exists($certFile)) {
-    send_json_response([
-        'status' => 'ERROR',
-        'message' => 'CertificateManager not found - security check failed'
-    ]);
+    send_json_response(['status' => 'ERROR', 'message' => 'CertificateManager not found']);
     exit;
 }
-
 if (!class_exists('CertificateManager')) {
     require_once $certFile;
 }
-
-// ============================================================
-// FUNCTIONS
-// ============================================================
 
 function send_json_response($data) {
     while (ob_get_level()) {
@@ -74,34 +51,23 @@ function send_json_response($data) {
 }
 
 function json_response($status, $data = []) {
-    $response = [
-        'status' => $status,
-        'timestamp' => time()
-    ];
-    
+    $response = ['status' => $status, 'timestamp' => time()];
     if (isset($data['message'])) {
         $response['message'] = $data['message'];
     }
-    
     if (isset($data['amount'])) {
         $response['amount'] = $data['amount'];
     }
-    
     foreach ($data as $key => $value) {
         if (!isset($response[$key])) {
             $response[$key] = $value;
         }
     }
-    
     send_json_response($response);
 }
 
-// ============================================================
-// FUNCTION: Notify VouchMorph of successful cashout
-// ============================================================
 function notifyVouchMorph($voucherNumber, $amount, $atmId, $cashoutReference, $requester, $swapReference = null) {
     $vouchMorphUrl = 'https://vouchmorphn.com/api/v1/swap/cashout-confirm';
-    
     $payload = [
         'voucher_number' => $voucherNumber,
         'amount' => $amount,
@@ -111,52 +77,28 @@ function notifyVouchMorph($voucherNumber, $amount, $atmId, $cashoutReference, $r
         'swap_reference' => $swapReference,
         'timestamp' => time()
     ];
-    
-    // Sign the payload if function exists
     if (function_exists('generate_signature')) {
         $payload['signature'] = generate_signature($payload, 'ZURUBANK');
     }
     
-    error_log("ATM Cashout: Notifying VouchMorph at {$vouchMorphUrl}");
-    error_log("ATM Cashout: Payload: " . json_encode($payload));
-    
     $ch = curl_init($vouchMorphUrl);
     curl_setopt($ch, CURLOPT_POST, true);
     curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        'Content-Type: application/json',
-        'X-Correlation-ID: ' . uniqid('ATM_', true),
-        'X-Source: ZURUBANK_ATM'
-    ]);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json', 'X-Correlation-ID: ' . uniqid('ATM_', true), 'X-Source: ZURUBANK_ATM']);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_TIMEOUT, 10);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
-    
     $response = curl_exec($ch);
     $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     $curlError = curl_error($ch);
     curl_close($ch);
-    
     if ($curlError) {
-        error_log("ATM Cashout: VouchMorph notification CURL error: " . $curlError);
         return ['success' => false, 'message' => $curlError];
     }
-    
     if ($httpCode < 200 || $httpCode >= 300) {
-        error_log("ATM Cashout: VouchMorph notification failed with HTTP {$httpCode}");
-        error_log("ATM Cashout: Response: " . substr($response, 0, 500));
         return ['success' => false, 'message' => "HTTP {$httpCode}", 'response' => $response];
     }
-    
-    error_log("ATM Cashout: VouchMorph notification successful (HTTP {$httpCode})");
-    error_log("ATM Cashout: Response: " . substr($response, 0, 500));
-    
     return ['success' => true, 'response' => json_decode($response, true)];
 }
-
-// ============================================================
-// READ INPUT
-// ============================================================
 
 $rawInput = file_get_contents("php://input");
 $data = json_decode($rawInput, true);
@@ -178,33 +120,14 @@ if (!$voucherNumber || !$voucherPin) {
 
 error_log("ATM Cashout: Processing voucher: {$voucherNumber}, ATM: {$atmId}");
 
-// ============================================================
-// CERTIFICATE-BASED VERIFICATION (WITH FALLBACK)
-// ============================================================
-
 $certManager = new CertificateManager('ZURUBANK');
-
-// ============================================================
-// FIX: Allow certificate verification with fallback for internal ATMs
-// ============================================================
-
 $isValid = false;
-$requester = $data['requester'] ?? 'ATM_SYSTEM';
 $verificationMessage = '';
 
-// Check if CertificateManager is configured
 $isConfigured = $certManager->isConfigured();
-
-// Determine if this is an internal ATM call (no certificate provided)
 $isInternalAtm = !isset($data['certificate']) || !isset($data['signature']);
 
 if ($isInternalAtm) {
-    // ============================================================
-    // INTERNAL ATM: Trust by default (signed server-side)
-    // ============================================================
-    error_log("ATM Cashout: Internal ATM request - trusting server-side signing");
-    
-    // Create a signed request on behalf of the ATM
     $signedData = $certManager->createSignedRequest([
         'voucher_number' => $voucherNumber,
         'voucher_pin'    => $voucherPin,
@@ -213,47 +136,22 @@ if ($isInternalAtm) {
         'action'         => $data['action'] ?? 'CASHOUT',
         'timestamp'      => time()
     ], 'ZURUBANK_ATM_' . $atmId);
-    
-    // Verify the signature we just created
     $verification = $certManager->verifySignedRequest($signedData);
     $isValid = $verification['verified'] ?? true;
     $requester = 'ZURUBANK_ATM_' . $atmId;
     $verificationMessage = 'Internal ATM - server signed';
-    
-    error_log("ATM Cashout: Internal ATM verification: " . ($isValid ? "PASSED ✓" : "FAILED ✗"));
-    
 } elseif (!$isConfigured) {
-    // ============================================================
-    // NOT CONFIGURED: Bypass for testing (WITH WARNING)
-    // ============================================================
-    error_log("ATM Cashout: CertificateManager not configured — BYPASSING verification (TEST MODE)");
     $isValid = true;
     $verificationMessage = 'BYPASSED - CertificateManager not configured';
-    
 } else {
-    // ============================================================
-    // EXTERNAL CALLER: Verify certificate
-    // ============================================================
-    error_log("ATM Cashout: External certificate presented — verifying");
-    
     try {
         $verification = $certManager->verifySignedRequest($data);
         $isValid = $verification['verified'] ?? false;
         $requester = $verification['requester'] ?? $data['requester'] ?? 'UNKNOWN';
         $verificationMessage = $verification['message'] ?? 'Certificate verification';
-        
-        error_log("ATM Cashout: External verification result: " . ($isValid ? "VALID ✓" : "INVALID ✗"));
-        error_log("ATM Cashout: Requester: {$requester}");
-        
         if (!$isValid) {
-            // ============================================================
-            // FIX: Allow bypass for known internal certificate failures
-            // ============================================================
             $errorMsg = $verification['message'] ?? '';
-            
-            // If the error is about untrusted certificate, check if it's from a known source
             if (strpos($errorMsg, 'Certificate not trusted') !== false) {
-                // Check if this is from a known internal source
                 $knownInternalSources = ['VOUCHMORPH', 'ZURUBANK_INTERNAL', 'ATM_SYSTEM'];
                 $isKnownSource = false;
                 foreach ($knownInternalSources as $source) {
@@ -262,35 +160,19 @@ if ($isInternalAtm) {
                         break;
                     }
                 }
-                
                 if ($isKnownSource) {
-                    error_log("ATM Cashout: Certificate not trusted but from known source {$requester} — ALLOWING");
                     $isValid = true;
                     $verificationMessage = 'TRUSTED_INTERNAL - Certificate not in CA store but known source';
                 } else {
-                    error_log("ATM Cashout: Certificate not trusted and not from known source — DECLINED");
-                    json_response("DECLINED", [
-                        "message" => "Verification failed: " . $errorMsg,
-                        "timestamp" => time()
-                    ]);
+                    json_response("DECLINED", ["message" => "Verification failed: " . $errorMsg]);
                     exit;
                 }
             } else {
-                // Other verification failure
-                json_response("DECLINED", [
-                    "message" => "Verification failed: " . $errorMsg,
-                    "timestamp" => time()
-                ]);
+                json_response("DECLINED", ["message" => "Verification failed: " . $errorMsg]);
                 exit;
             }
         }
-        
     } catch (Exception $e) {
-        error_log("ATM Cashout: Certificate verification exception: " . $e->getMessage());
-        
-        // ============================================================
-        // FIX: On exception, allow if it's a known internal source
-        // ============================================================
         $knownInternalSources = ['VOUCHMORPH', 'ZURUBANK_INTERNAL', 'ATM_SYSTEM'];
         $isKnownSource = false;
         foreach ($knownInternalSources as $source) {
@@ -299,108 +181,31 @@ if ($isInternalAtm) {
                 break;
             }
         }
-        
         if ($isKnownSource) {
-            error_log("ATM Cashout: Certificate exception but known source — ALLOWING");
             $isValid = true;
             $verificationMessage = 'TRUSTED_INTERNAL - Certificate exception bypass';
         } else {
-            json_response("DECLINED", [
-                "message" => "Verification failed: " . $e->getMessage(),
-                "timestamp" => time()
-            ]);
+            json_response("DECLINED", ["message" => "Verification failed: " . $e->getMessage()]);
             exit;
         }
     }
 }
 
 error_log("ATM Cashout: Final verification status: " . ($isValid ? "VALID ✓" : "INVALID ✗"));
-error_log("ATM Cashout: Requester: {$requester}, Message: {$verificationMessage}");
-
-// ============================================================
-// PROCESS CASHOUT
-// ============================================================
 
 try {
-    // Check database connection
     if (!isset($pdo)) {
         throw new Exception("Database connection not available");
     }
-    
     $pdo->beginTransaction();
 
-    // -------------------------
-    // Check/Create tables with enhanced columns
-    // -------------------------
-    try {
-        $pdo->exec("
-            CREATE TABLE IF NOT EXISTS atm_dispenses (
-                id SERIAL PRIMARY KEY,
-                atm_id VARCHAR(50) NOT NULL,
-                trace_number VARCHAR(255) NOT NULL UNIQUE,
-                amount NUMERIC(20,4) NOT NULL,
-                status VARCHAR(50) DEFAULT 'DISPENSED',
-                created_at TIMESTAMP DEFAULT NOW(),
-                updated_at TIMESTAMP DEFAULT NOW(),
-                signature_verified BOOLEAN DEFAULT FALSE,
-                verification_method VARCHAR(50),
-                requester VARCHAR(100)
-            )
-        ");
-        
-        $stmtCheck = $pdo->query("
-            SELECT column_name 
-            FROM information_schema.columns 
-            WHERE table_name = 'atm_dispenses' AND column_name = 'currency'
-        ");
-        if (!$stmtCheck->fetch()) {
-            $pdo->exec("ALTER TABLE atm_dispenses ADD COLUMN currency VARCHAR(10) DEFAULT 'BWP'");
-        }
-        
-        $stmtCheckVm = $pdo->query("
-            SELECT column_name 
-            FROM information_schema.columns 
-            WHERE table_name = 'atm_dispenses' AND column_name = 'verification_method'
-        ");
-        if (!$stmtCheckVm->fetch()) {
-            $pdo->exec("ALTER TABLE atm_dispenses ADD COLUMN verification_method VARCHAR(50)");
-        }
-        
-        $stmtCheckUp = $pdo->query("
-            SELECT column_name 
-            FROM information_schema.columns 
-            WHERE table_name = 'atm_dispenses' AND column_name = 'updated_at'
-        ");
-        if (!$stmtCheckUp->fetch()) {
-            $pdo->exec("ALTER TABLE atm_dispenses ADD COLUMN updated_at TIMESTAMP DEFAULT NOW()");
-        }
-    } catch (Exception $e) {
-        error_log("Table setup warning: " . $e->getMessage());
-    }
-
-    // -------------------------
-    // Fetch Voucher (FOR UPDATE prevents race condition)
-    // USING CORRECT COLUMN NAMES
-    // -------------------------
+    // Fetch Voucher
     $stmt = $pdo->prepare("
         SELECT 
-            voucher_id,
-            voucher_number,
-            voucher_pin,
-            amount,
-            currency,
-            status,
-            created_by,
-            recipient_phone,
-            voucher_created_at,
-            voucher_expires_at,
-            redeemed_at,
-            redeemed_by,
-            source_institution,
-            source_hold_reference,
-            reference,
-            source_asset_type,
-            holding_account
+            voucher_id, voucher_number, voucher_pin, amount, currency, status,
+            created_by, recipient_phone, voucher_created_at, voucher_expires_at,
+            redeemed_at, redeemed_by, source_institution, source_hold_reference,
+            reference, source_asset_type, holding_account
         FROM instant_money_vouchers
         WHERE voucher_number = :voucher_number
         FOR UPDATE
@@ -414,32 +219,26 @@ try {
 
     error_log("ATM Cashout: Found voucher ID={$voucher['voucher_id']}, Status={$voucher['status']}, Amount={$voucher['amount']}");
 
-    // Validate PIN
     if ($voucher['voucher_pin'] !== $voucherPin) {
         throw new Exception("Invalid PIN for voucher: {$voucherNumber}");
     }
 
-    // Validate Status
     $allowedStatuses = ['active', 'hold', 'pending'];
     if (!in_array($voucher['status'], $allowedStatuses)) {
         throw new Exception("Voucher cannot be cashed out (status: {$voucher['status']})");
     }
 
-    // Check if already redeemed
     if ($voucher['status'] === 'redeemed' || !is_null($voucher['redeemed_at'])) {
         throw new Exception("Voucher has already been redeemed");
     }
 
-    // Check Expiry
     if ($voucher['voucher_expires_at'] && strtotime($voucher['voucher_expires_at']) < time()) {
         throw new Exception("Voucher expired at: {$voucher['voucher_expires_at']}");
     }
 
     $amount = floatval($voucher['amount']);
 
-    // ============================================================
-    // Mark Voucher as Redeemed - FIXED: Use user_id, not requester string
-    // ============================================================
+    // Mark Voucher as Redeemed - Use user_id (INTEGER)
     $update = $pdo->prepare("
         UPDATE instant_money_vouchers
         SET status = 'redeemed',
@@ -449,72 +248,25 @@ try {
     ");
     $update->execute([
         ':voucher_id' => $voucher['voucher_id'],
-        ':user_id' => $voucher['created_by'] ?? 1  // Use the user ID from the voucher
+        ':user_id' => $voucher['created_by'] ?? 1
     ]);
 
-    // ============================================================
-    // Create Cashout Record (USING CORRECT TABLE/COLUMN NAMES)
-    // ============================================================
+    // Create Cashout Record
     $cashoutReference = 'CASHOUT-' . time() . '-' . substr($voucherNumber, -6);
-    
-    // Ensure cashouts table has required columns
-    try {
-        $stmtCheckCols = $pdo->query("
-            SELECT column_name FROM information_schema.columns 
-            WHERE table_name = 'cashouts' AND column_name = 'verification_method'
-        ");
-        if (!$stmtCheckCols->fetch()) {
-            $pdo->exec("ALTER TABLE cashouts ADD COLUMN verification_method VARCHAR(50)");
-        }
-        
-        $stmtCheckReq = $pdo->query("
-            SELECT column_name FROM information_schema.columns 
-            WHERE table_name = 'cashouts' AND column_name = 'requester'
-        ");
-        if (!$stmtCheckReq->fetch()) {
-            $pdo->exec("ALTER TABLE cashouts ADD COLUMN requester VARCHAR(100)");
-            $pdo->exec("ALTER TABLE cashouts ADD COLUMN signature_verified BOOLEAN DEFAULT FALSE");
-        }
-    } catch (Exception $e) {
-        // Table might not exist yet
-    }
     
     $insertCashout = $pdo->prepare("
         INSERT INTO cashouts (
-            trace_number,
-            cashout_reference,
-            destination_bank_id,
-            user_id,
-            amount,
-            currency,
-            status,
-            atm_id,
-            requester,
-            signature_verified,
-            verification_method,
-            created_at,
-            dispensed_at,
-            updated_at
+            trace_number, cashout_reference, destination_bank_id, user_id,
+            amount, currency, status, atm_id, requester,
+            signature_verified, verification_method, created_at, dispensed_at, updated_at
         )
         VALUES (
-            :trace_number,
-            :cashout_reference,
-            :destination_bank_id,
-            :user_id,
-            :amount,
-            :currency,
-            'COMPLETED',
-            :atm_id,
-            :requester,
-            :sig_verified,
-            :verification_method,
-            NOW(),
-            NOW(),
-            NOW()
+            :trace_number, :cashout_reference, :destination_bank_id, :user_id,
+            :amount, :currency, 'COMPLETED', :atm_id, :requester,
+            :sig_verified, :verification_method, NOW(), NOW(), NOW()
         )
         RETURNING cashout_id
     ");
-    
     $insertCashout->execute([
         ':trace_number' => $voucherNumber,
         ':cashout_reference' => $cashoutReference,
@@ -529,167 +281,70 @@ try {
     ]);
     $cashoutId = $insertCashout->fetchColumn();
 
-    // ============================================================
-    // Insert ATM Dispense Record
-    // ============================================================
-    $stmtCols = $pdo->query("SELECT column_name FROM information_schema.columns WHERE table_name = 'atm_dispenses'");
-    $columns = $stmtCols->fetchAll(PDO::FETCH_COLUMN);
-    
-    if (in_array('currency', $columns)) {
-        $insert = $pdo->prepare("
-            INSERT INTO atm_dispenses (
-                atm_id,
-                trace_number,
-                amount,
-                currency,
-                status,
-                requester,
-                signature_verified,
-                verification_method,
-                created_at,
-                updated_at
-            )
-            VALUES (?, ?, ?, ?, 'DISPENSED', ?, ?, ?, NOW(), NOW())
-            ON CONFLICT (trace_number) DO NOTHING
-        ");
-        $insert->execute([
-            $atmId,
-            $voucherNumber,
-            $amount,
-            $voucher['currency'] ?? 'BWP',
-            $requester,
-            $isValid ? 1 : 0,
-            'certificate'
-        ]);
-    } else {
-        $insert = $pdo->prepare("
-            INSERT INTO atm_dispenses (
-                atm_id,
-                trace_number,
-                amount,
-                status,
-                requester,
-                signature_verified,
-                verification_method,
-                created_at,
-                updated_at
-            )
-            VALUES (?, ?, ?, 'DISPENSED', ?, ?, ?, NOW(), NOW())
-            ON CONFLICT (trace_number) DO NOTHING
-        ");
-        $insert->execute([
-            $atmId,
-            $voucherNumber,
-            $amount,
-            $requester,
-            $isValid ? 1 : 0,
-            'certificate'
-        ]);
-    }
+    // Insert ATM Dispense Record (only columns that exist)
+    $insertAtm = $pdo->prepare("
+        INSERT INTO atm_dispenses (
+            atm_id, trace_number, amount, currency, status, created_at
+        )
+        VALUES (?, ?, ?, ?, 'DISPENSED', NOW())
+        ON CONFLICT (trace_number) DO NOTHING
+    ");
+    $insertAtm->execute([
+        $atmId, $voucherNumber, $amount, $voucher['currency'] ?? 'BWP'
+    ]);
 
-    // ============================================================
-    // Create Transaction Record
-    // ============================================================
+    // Create Transaction Record (only columns that exist)
     $stmtTx = $pdo->prepare("
         INSERT INTO transactions (
-            user_id,
-            from_account,
-            to_account,
-            type,
-            amount,
-            reference,
-            description,
-            status,
-            requester,
-            signature_verified,
-            verification_method,
-            created_at,
-            updated_at
+            user_id, from_account, to_account, type, amount,
+            reference, description, status, created_at, updated_at
         )
         VALUES (
-            :user_id,
-            :from_account,
-            :to_account,
-            'atm_cashout',
-            :amount,
-            :reference,
-            :description,
-            'completed',
-            :requester,
-            :sig_verified,
-            :verification_method,
-            NOW(),
-            NOW()
+            :user_id, :from_account, :to_account, 'atm_cashout', :amount,
+            :reference, :description, 'completed', NOW(), NOW()
         )
     ");
-
     $stmtTx->execute([
         ':user_id' => $voucher['created_by'] ?? 1,
         ':from_account' => $voucher['holding_account'] ?? 'VOUCHER-SUSPENSE',
         ':to_account' => 'ATM:' . $atmId,
         ':amount' => $amount,
         ':reference' => $voucherNumber,
-        ':description' => "ATM cashout of voucher {$voucherNumber} at {$atmId} (authorized by {$requester})",
-        ':requester' => $requester,
-        ':sig_verified' => $isValid ? 1 : 0,
-        ':verification_method' => 'certificate'
+        ':description' => "ATM cashout of voucher {$voucherNumber} at {$atmId}"
     ]);
 
-    // ============================================================
-    // Record in swap_ledger
-    // ============================================================
+    // Record in swap_ledger (only columns that exist)
     $stmtLedger = $pdo->prepare("
         INSERT INTO swap_ledger (
-            reference_id,
-            debit_account,
-            credit_account,
-            amount,
-            currency,
-            description,
-            requester,
-            signature_verified,
-            created_at
+            reference_id, debit_account, credit_account, amount, currency, description, created_at
         )
         VALUES (
-            :reference_id,
-            :debit_account,
-            :credit_account,
-            :amount,
-            :currency,
-            :description,
-            :requester,
-            :sig_verified,
-            NOW()
+            :reference_id, :debit_account, :credit_account, :amount, :currency, :description, NOW()
         )
     ");
-
     $stmtLedger->execute([
         ':reference_id' => $voucherNumber,
         ':debit_account' => $voucher['holding_account'] ?? 'VOUCHER-SUSPENSE',
         ':credit_account' => 'ATM:' . $atmId,
         ':amount' => $amount,
         ':currency' => $voucher['currency'] ?? 'BWP',
-        ':description' => "ATM cashout settlement for voucher {$voucherNumber} (authorized by {$requester})",
-        ':requester' => $requester,
-        ':sig_verified' => $isValid ? 1 : 0
+        ':description' => "ATM cashout settlement for voucher {$voucherNumber}"
     ]);
 
-    // ============================================================
     // Audit Log
-    // ============================================================
     $auditStmt = $pdo->prepare("
-        INSERT INTO audit_logs 
-        (entity_type, entity_id, action, category, severity, performed_by, 
-         performed_by_cert_verified, verification_method, metadata, performed_at)
-        VALUES 
-        ('instant_money_vouchers', :entity_id, 'CASHOUT', 'financial', 'info', :performed_by,
-         :cert_verified, :verification_method, :metadata, NOW())
+        INSERT INTO audit_logs (
+            entity, entity_id, action, category, severity,
+            performed_by, performed_at, metadata
+        )
+        VALUES (
+            'instant_money_vouchers', :entity_id, 'CASHOUT', 'financial', 'info',
+            :performed_by, NOW(), :metadata::jsonb
+        )
     ");
     $auditStmt->execute([
         'entity_id' => $voucher['voucher_id'],
         'performed_by' => $requester,
-        'cert_verified' => $isValid ? 1 : 0,
-        'verification_method' => 'certificate',
         'metadata' => json_encode([
             'signature_verified' => $isValid,
             'amount' => $amount,
@@ -706,28 +361,18 @@ try {
 
     error_log("ATM Cashout: Cashout completed - Voucher: {$voucherNumber}, Amount: {$amount}, ATM: {$atmId}");
 
-    // ============================================================
-    // 🔔 NOTIFY VOUCHMORPH THAT CASHOUT IS COMPLETE
-    // ============================================================
+    // Notify VouchMorph
     $notificationResult = notifyVouchMorph(
-        $voucherNumber,
-        $amount,
-        $atmId,
-        $cashoutReference,
-        $requester,
-        $voucher['reference'] ?? null  // swap reference
+        $voucherNumber, $amount, $atmId, $cashoutReference,
+        $requester, $voucher['reference'] ?? null
     );
     
     if ($notificationResult['success']) {
         error_log("ATM Cashout: ✅ VouchMorph notified successfully");
     } else {
-        error_log("ATM Cashout: ⚠️ VouchMorph notification failed - cashout still processed locally");
-        error_log("ATM Cashout: Notification error: " . ($notificationResult['message'] ?? 'Unknown'));
+        error_log("ATM Cashout: ⚠️ VouchMorph notification failed - " . ($notificationResult['message'] ?? 'Unknown'));
     }
 
-    // ============================================================
-    // SEND SIGNED RESPONSE WITH CERTIFICATE
-    // ============================================================
     $responsePayload = [
         "status" => "CASHOUT_SUCCESS",
         "voucher_number" => $voucherNumber,
@@ -755,13 +400,8 @@ try {
     if (isset($pdo) && $pdo->inTransaction()) {
         $pdo->rollBack();
     }
-
     error_log("ATM Cashout ERROR: " . $e->getMessage());
     error_log("ATM Cashout Trace: " . $e->getTraceAsString());
     error_log("ATM Cashout Input: " . json_encode($data ?? []));
-    
-    json_response("DECLINED", [
-        "message" => $e->getMessage(),
-        "timestamp" => time()
-    ]);
+    json_response("DECLINED", ["message" => $e->getMessage(), "timestamp" => time()]);
 }
