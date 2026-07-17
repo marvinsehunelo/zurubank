@@ -238,7 +238,7 @@ try {
 
     $amount = floatval($voucher['amount']);
 
-    // Mark Voucher as Redeemed - Use user_id (INTEGER)
+    // Mark Voucher as Redeemed
     $update = $pdo->prepare("
         UPDATE instant_money_vouchers
         SET status = 'redeemed',
@@ -281,7 +281,7 @@ try {
     ]);
     $cashoutId = $insertCashout->fetchColumn();
 
-    // Insert ATM Dispense Record (only columns that exist)
+    // Insert ATM Dispense Record
     $insertAtm = $pdo->prepare("
         INSERT INTO atm_dispenses (
             atm_id, trace_number, amount, currency, status, created_at
@@ -293,15 +293,15 @@ try {
         $atmId, $voucherNumber, $amount, $voucher['currency'] ?? 'BWP'
     ]);
 
-    // Create Transaction Record (only columns that exist)
+    // Create Transaction Record - NO updated_at column exists!
     $stmtTx = $pdo->prepare("
         INSERT INTO transactions (
             user_id, from_account, to_account, type, amount,
-            reference, description, status, created_at, updated_at
+            reference, description, status, created_at
         )
         VALUES (
             :user_id, :from_account, :to_account, 'atm_cashout', :amount,
-            :reference, :description, 'completed', NOW(), NOW()
+            :reference, :description, 'completed', NOW()
         )
     ");
     $stmtTx->execute([
@@ -313,7 +313,7 @@ try {
         ':description' => "ATM cashout of voucher {$voucherNumber} at {$atmId}"
     ]);
 
-    // Record in swap_ledger (only columns that exist)
+    // Record in swap_ledger - NO updated_at column needed
     $stmtLedger = $pdo->prepare("
         INSERT INTO swap_ledger (
             reference_id, debit_account, credit_account, amount, currency, description, created_at
@@ -335,26 +335,16 @@ try {
     $auditStmt = $pdo->prepare("
         INSERT INTO audit_logs (
             entity, entity_id, action, category, severity,
-            performed_by, performed_at, metadata
+            performed_by, performed_at
         )
         VALUES (
             'instant_money_vouchers', :entity_id, 'CASHOUT', 'financial', 'info',
-            :performed_by, NOW(), :metadata::jsonb
+            :performed_by, NOW()
         )
     ");
     $auditStmt->execute([
         'entity_id' => $voucher['voucher_id'],
-        'performed_by' => $requester,
-        'metadata' => json_encode([
-            'signature_verified' => $isValid,
-            'amount' => $amount,
-            'atm_id' => $atmId,
-            'voucher_number' => $voucherNumber,
-            'cashout_id' => $cashoutId,
-            'source_institution' => $voucher['source_institution'] ?? null,
-            'source_hold_reference' => $voucher['source_hold_reference'] ?? null,
-            'swap_reference' => $voucher['reference'] ?? null
-        ])
+        'performed_by' => $requester
     ]);
 
     $pdo->commit();
