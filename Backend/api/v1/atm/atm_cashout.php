@@ -4,6 +4,7 @@
 // ZuruBank ATM Voucher Cashout (Swap Origin Supported)
 // FIXED: Certificate verification with fallback for internal ATM terminals
 // FIXED: Correct column names for instant_money_vouchers table
+// ADDED: VouchMorph notification after successful cashout
 // --------------------------------------------------
 
 header('Content-Type: application/json');
@@ -92,6 +93,64 @@ function json_response($status, $data = []) {
     }
     
     send_json_response($response);
+}
+
+// ============================================================
+// FUNCTION: Notify VouchMorph of successful cashout
+// ============================================================
+function notifyVouchMorph($voucherNumber, $amount, $atmId, $cashoutReference, $requester, $swapReference = null) {
+    $vouchMorphUrl = 'https://vouchmorphn.com/api/v1/swap/cashout-confirm';
+    
+    $payload = [
+        'voucher_number' => $voucherNumber,
+        'amount' => $amount,
+        'atm_id' => $atmId,
+        'cashout_reference' => $cashoutReference,
+        'requester' => $requester,
+        'swap_reference' => $swapReference,
+        'timestamp' => time()
+    ];
+    
+    // Sign the payload if function exists
+    if (function_exists('generate_signature')) {
+        $payload['signature'] = generate_signature($payload, 'ZURUBANK');
+    }
+    
+    error_log("ATM Cashout: Notifying VouchMorph at {$vouchMorphUrl}");
+    error_log("ATM Cashout: Payload: " . json_encode($payload));
+    
+    $ch = curl_init($vouchMorphUrl);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'Content-Type: application/json',
+        'X-Correlation-ID: ' . uniqid('ATM_', true),
+        'X-Source: ZURUBANK_ATM'
+    ]);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+    
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlError = curl_error($ch);
+    curl_close($ch);
+    
+    if ($curlError) {
+        error_log("ATM Cashout: VouchMorph notification CURL error: " . $curlError);
+        return ['success' => false, 'message' => $curlError];
+    }
+    
+    if ($httpCode < 200 || $httpCode >= 300) {
+        error_log("ATM Cashout: VouchMorph notification failed with HTTP {$httpCode}");
+        error_log("ATM Cashout: Response: " . substr($response, 0, 500));
+        return ['success' => false, 'message' => "HTTP {$httpCode}", 'response' => $response];
+    }
+    
+    error_log("ATM Cashout: VouchMorph notification successful (HTTP {$httpCode})");
+    error_log("ATM Cashout: Response: " . substr($response, 0, 500));
+    
+    return ['success' => true, 'response' => json_decode($response, true)];
 }
 
 // ============================================================
@@ -647,6 +706,25 @@ try {
     error_log("ATM Cashout: Cashout completed - Voucher: {$voucherNumber}, Amount: {$amount}, ATM: {$atmId}");
 
     // ============================================================
+    // 🔔 NOTIFY VOUCHMORPH THAT CASHOUT IS COMPLETE
+    // ============================================================
+    $notificationResult = notifyVouchMorph(
+        $voucherNumber,
+        $amount,
+        $atmId,
+        $cashoutReference,
+        $requester,
+        $voucher['reference'] ?? null  // swap reference
+    );
+    
+    if ($notificationResult['success']) {
+        error_log("ATM Cashout: ✅ VouchMorph notified successfully");
+    } else {
+        error_log("ATM Cashout: ⚠️ VouchMorph notification failed - cashout still processed locally");
+        error_log("ATM Cashout: Notification error: " . ($notificationResult['message'] ?? 'Unknown'));
+    }
+
+    // ============================================================
     // SEND SIGNED RESPONSE WITH CERTIFICATE
     // ============================================================
     $responsePayload = [
@@ -661,8 +739,9 @@ try {
         "signature_verified" => $isValid,
         "verification_method" => "certificate",
         "verification_message" => $verificationMessage,
+        "vouchmorph_notified" => $notificationResult['success'],
         "timestamp" => date("Y-m-d H:i:s"),
-        "message" => "Cashout successful"
+        "message" => "Cashout successful" . ($notificationResult['success'] ? "" : " (VouchMorph notification pending)")
     ];
     
     if (function_exists('send_signed_response')) {
