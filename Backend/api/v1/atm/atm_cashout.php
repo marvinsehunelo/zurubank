@@ -67,7 +67,7 @@ function json_response($status, $data = []) {
 }
 
 function notifyVouchMorph($voucherNumber, $amount, $atmId, $cashoutReference, $requester, $swapReference = null) {
-    $vouchMorphUrl = 'https://vouchmorphn.com/api/v1/swap/cashout-confirm';
+    $vouchMorphUrl = 'https://vouchmorphn-production.up.railway.app/api/v1/swap/cashout_confirm.php';
     $payload = [
         'voucher_number' => $voucherNumber,
         'amount' => $amount,
