@@ -4,6 +4,7 @@
 // ZuruBank ATM Voucher Cashout (Swap Origin Supported)
 // FIXED: Certificate verification with fallback for internal ATM terminals
 // FIXED: Correct column names for instant_money_vouchers table
+// FIXED: redeemed_by now uses user_id instead of requester string
 // ADDED: VouchMorph notification after successful cashout
 // --------------------------------------------------
 
@@ -437,18 +438,18 @@ try {
     $amount = floatval($voucher['amount']);
 
     // ============================================================
-    // Mark Voucher as Redeemed (USING CORRECT COLUMN NAMES)
+    // Mark Voucher as Redeemed - FIXED: Use user_id, not requester string
     // ============================================================
     $update = $pdo->prepare("
         UPDATE instant_money_vouchers
         SET status = 'redeemed',
             redeemed_at = NOW(),
-            redeemed_by = :requester
+            redeemed_by = :user_id
         WHERE voucher_id = :voucher_id
     ");
     $update->execute([
         ':voucher_id' => $voucher['voucher_id'],
-        ':requester' => $requester
+        ':user_id' => $voucher['created_by'] ?? 1  // Use the user ID from the voucher
     ]);
 
     // ============================================================
