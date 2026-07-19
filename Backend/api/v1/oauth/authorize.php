@@ -3,8 +3,8 @@
 // Bank's OAuth Authorization Server
 
 session_start();
-require_once '../../../../config/db.php';
-require_once '../../../../config/jwt.php';
+require_once __DIR__ . '/../../config/db.php';
+require_once __DIR__ . '/../../config/jwt.php';
 
 // Get request parameters
 $client_id = $_GET['client_id'] ?? '';        // VouchMorph's App ID
