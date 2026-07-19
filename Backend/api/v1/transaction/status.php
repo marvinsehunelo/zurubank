@@ -3,8 +3,8 @@
 
 header('Content-Type: application/json');
 require_once __DIR__ . '/../auth.php';
-require_once __DIR__ . '/../../helpers/crypto.php';
-require_once __DIR__ . '/../../helpers/CertificateManager.php';
+require_once __DIR__ . '/../../../helpers/crypto.php';
+require_once __DIR__ . '/../../../helpers/CertificateManager.php';
 
 // Validate API key first
 $client = validate_api_key();
