@@ -11,6 +11,16 @@ header("Content-Type: application/json");
 // Enable PDO exceptions
 $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 
+// ============================================================
+// CHECK FOR OAUTH RETURN URL (from GET or POST)
+// ============================================================
+if (isset($_GET['return_url']) && !empty($_GET['return_url'])) {
+    $_SESSION['oauth_return_url'] = $_GET['return_url'];
+}
+if (isset($_POST['return_url']) && !empty($_POST['return_url'])) {
+    $_SESSION['oauth_return_url'] = $_POST['return_url'];
+}
+
 $data = json_decode(file_get_contents("php://input"), true);
 $email = trim($data['email'] ?? '');
 $password = $data['password'] ?? '';
@@ -55,6 +65,24 @@ try {
     ];
     $_SESSION['authToken'] = $token;
 
+    // ============================================================
+    // CHECK IF THIS IS AN OAUTH FLOW
+    // ============================================================
+    if (isset($_SESSION['oauth_return_url'])) {
+        $return_url = $_SESSION['oauth_return_url'];
+        unset($_SESSION['oauth_return_url']);
+        
+        echo json_encode([
+            "status" => "success",
+            "message" => "Login successful",
+            "token" => $token,
+            "full_name" => $user['full_name'],
+            "redirect_url" => $return_url,
+            "oauth_redirect" => true
+        ]);
+        exit;
+    }
+
     echo json_encode([
         "status" => "success",
         "message" => "Login successful",
@@ -68,4 +96,3 @@ try {
         "debug" => "Exception: " . $e->getMessage()
     ]);
 }
-
