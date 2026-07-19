@@ -10,6 +10,14 @@ if (session_status() === PHP_SESSION_NONE) {
 require_once __DIR__ . '/../../../config/db.php';
 require_once __DIR__ . '/../../../config/jwt.php';
 
+// ============================================================
+// CHECK: Is $pdo available from db.php?
+// ============================================================
+if (!isset($pdo) || $pdo === null) {
+    error_log("OAuth authorize: Database connection not available");
+    die("Database connection error");
+}
+
 // Get request parameters
 $client_id = $_GET['client_id'] ?? '';        // VouchMorph's App ID
 $redirect_uri = $_GET['redirect_uri'] ?? '';  // VouchMorph callback URL
@@ -49,7 +57,7 @@ if (!$user_id) {
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['username']) && isset($_POST['password'])) {
     // Validate credentials
     try {
-        $stmt = $db->prepare("SELECT user_id FROM users WHERE username = ? AND password_hash = ?");
+        $stmt = $pdo->prepare("SELECT user_id FROM users WHERE username = ? AND password_hash = ?");
         $stmt->execute([$_POST['username'], md5($_POST['password'])]);
         $user = $stmt->fetch(PDO::FETCH_ASSOC);
         
@@ -83,7 +91,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['consent']) && $_POST[
     
     try {
         // Store code with user ID and scope
-        $stmt = $db->prepare("INSERT INTO oauth_auth_codes (code, user_id, client_id, scope, expires_at) VALUES (?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL 10 MINUTE))");
+        // Use $pdo (from db.php)
+        $stmt = $pdo->prepare("INSERT INTO oauth_auth_codes (code, user_id, client_id, scope, expires_at) VALUES (?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL 10 MINUTE))");
         $stmt->execute([$auth_code, $user_id, $client_id, $scope]);
         
         // Redirect back to VouchMorph
