@@ -5,8 +5,16 @@
 require_once __DIR__ . '/../../../config/db.php';
 require_once __DIR__ . '/../../../config/jwt.php';
 
-
 header('Content-Type: application/json');
+
+// ============================================================
+// FIX: Use $pdo (not $db) - matches your db.php
+// ============================================================
+if (!isset($pdo) || $pdo === null) {
+    http_response_code(500);
+    echo json_encode(['error' => 'database_error']);
+    exit;
+}
 
 $input = json_decode(file_get_contents('php://input'), true);
 
@@ -25,7 +33,7 @@ if ($client_id !== 'VOUCHMORPH_APP_ID' || $client_secret !== 'YOUR_BANK_SECRET')
 
 if ($grant_type === 'authorization_code') {
     // Validate authorization code
-    $stmt = $db->prepare("SELECT * FROM oauth_auth_codes WHERE code = ? AND expires_at > NOW() AND used = 0");
+    $stmt = $pdo->prepare("SELECT * FROM oauth_auth_codes WHERE code = ? AND expires_at > NOW() AND used = 0");
     $stmt->execute([$code]);
     $auth_code = $stmt->fetch(PDO::FETCH_ASSOC);
     
@@ -36,19 +44,19 @@ if ($grant_type === 'authorization_code') {
     }
     
     // Mark code as used
-    $stmt = $db->prepare("UPDATE oauth_auth_codes SET used = 1 WHERE code = ?");
+    $stmt = $pdo->prepare("UPDATE oauth_auth_codes SET used = 1 WHERE code = ?");
     $stmt->execute([$code]);
     
     // Generate access token (JWT)
     $access_token = generateJWT([
         'user_id' => $auth_code['user_id'],
         'scope' => $auth_code['scope'],
-        'exp' => time() + 3600 // 1 hour
+        'exp' => time() + 3600
     ]);
     
     // Generate refresh token
     $refresh_token = bin2hex(random_bytes(32));
-    $stmt = $db->prepare("INSERT INTO oauth_refresh_tokens (token, user_id, client_id, expires_at) VALUES (?, ?, ?, DATE_ADD(NOW(), INTERVAL 30 DAY))");
+    $stmt = $pdo->prepare("INSERT INTO oauth_refresh_tokens (token, user_id, client_id, expires_at) VALUES (?, ?, ?, DATE_ADD(NOW(), INTERVAL 30 DAY))");
     $stmt->execute([$refresh_token, $auth_code['user_id'], $client_id]);
     
     echo json_encode([
@@ -61,7 +69,7 @@ if ($grant_type === 'authorization_code') {
     
 } elseif ($grant_type === 'refresh_token') {
     // Refresh token logic
-    $stmt = $db->prepare("SELECT * FROM oauth_refresh_tokens WHERE token = ? AND expires_at > NOW() AND revoked = 0");
+    $stmt = $pdo->prepare("SELECT * FROM oauth_refresh_tokens WHERE token = ? AND expires_at > NOW() AND revoked = 0");
     $stmt->execute([$refresh_token]);
     $token = $stmt->fetch(PDO::FETCH_ASSOC);
     
