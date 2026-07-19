@@ -90,11 +90,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['consent']) && $_POST[
     $auth_code = bin2hex(random_bytes(32));
     
     try {
-        // FIX: PostgreSQL uses NOW() + INTERVAL '10 minutes'
-        // NOT DATE_ADD() which is MySQL only
+        // FIX: PostgreSQL syntax with 'used' column
         $stmt = $pdo->prepare("
-            INSERT INTO oauth_auth_codes (code, user_id, client_id, scope, expires_at) 
-            VALUES (?, ?, ?, ?, NOW() + INTERVAL '10 minutes')
+            INSERT INTO oauth_auth_codes (code, user_id, client_id, scope, expires_at, used) 
+            VALUES (?, ?, ?, ?, NOW() + INTERVAL '10 minutes', false)
         ");
         $stmt->execute([$auth_code, $user_id, $client_id, $scope]);
         
