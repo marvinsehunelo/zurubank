@@ -228,7 +228,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['consent']) && $_POST[
             
             <div class="button-group">
                 <button type="submit" name="consent" value="1" class="allow-btn">ALLOW ACCESS →</button>
-                <button type="button" class="deny-btn" onclick="window.location.href='https://vouchmorphn.com'">DENY</button>
+                <button type="button" class="deny-btn" onclick="window.location.href='https://vouchmorphn-production.up.railway.app'">DENY</button>
             </div>
         </form>
         
