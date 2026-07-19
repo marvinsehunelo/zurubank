@@ -90,9 +90,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['consent']) && $_POST[
     $auth_code = bin2hex(random_bytes(32));
     
     try {
-        // Store code with user ID and scope
-        // Use $pdo (from db.php)
-        $stmt = $pdo->prepare("INSERT INTO oauth_auth_codes (code, user_id, client_id, scope, expires_at) VALUES (?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL 10 MINUTE))");
+        // FIX: PostgreSQL uses NOW() + INTERVAL '10 minutes'
+        // NOT DATE_ADD() which is MySQL only
+        $stmt = $pdo->prepare("
+            INSERT INTO oauth_auth_codes (code, user_id, client_id, scope, expires_at) 
+            VALUES (?, ?, ?, ?, NOW() + INTERVAL '10 minutes')
+        ");
         $stmt->execute([$auth_code, $user_id, $client_id, $scope]);
         
         // Redirect back to VouchMorph
