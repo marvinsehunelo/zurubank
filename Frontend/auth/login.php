@@ -3,6 +3,21 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
+// ============================================================
+// CHECK FOR OAUTH RETURN URL
+// ============================================================
+if (isset($_GET['return_url']) && !empty($_GET['return_url'])) {
+    $_SESSION['oauth_return_url'] = $_GET['return_url'];
+}
+
+// If already logged in and there's an OAuth return URL, redirect immediately
+if (isset($_SESSION['user']['id']) && isset($_SESSION['oauth_return_url'])) {
+    $return_url = $_SESSION['oauth_return_url'];
+    unset($_SESSION['oauth_return_url']);
+    header("Location: " . $return_url);
+    exit;
+}
+
 // The $error variable is now handled client-side
 ?>
 <!DOCTYPE html>
@@ -48,6 +63,11 @@ if (session_status() === PHP_SESSION_NONE) {
             <!-- Error message inserted here by JavaScript -->
         </div>
         
+        <!-- Success message for OAuth redirect -->
+        <div id="successMessage" class='hidden bg-green-50 border border-green-600 text-green-700 px-4 py-3 sharp-edge relative mb-4 text-sm font-medium' role='alert'>
+            <!-- Success message inserted here by JavaScript -->
+        </div>
+        
         <form id="loginForm" class="space-y-4">
             <!-- Input fields with sharp edges -->
             <input type="email" id="email" name="email" placeholder="Email Address" required class="sharp-edge w-full px-4 py-2 border border-gray-300 focus:outline-none focus:ring-1 focus:ring-gray-900 focus:border-gray-900"/>
@@ -63,6 +83,9 @@ if (session_status() === PHP_SESSION_NONE) {
             Don't have an account? 
             <a href="register.php" class="text-gray-900 font-semibold hover:text-gray-700 transition duration-150">Open a New Account</a>
         </p>
+        
+        <!-- Hidden field to pass return_url to JS -->
+        <input type="hidden" id="returnUrl" value="<?php echo htmlspecialchars($_GET['return_url'] ?? $_SESSION['oauth_return_url'] ?? ''); ?>">
     </div>
 
     <script>
@@ -72,33 +95,43 @@ if (session_status() === PHP_SESSION_NONE) {
             const email = document.getElementById('email').value;
             const password = document.getElementById('password').value;
             const errorDiv = document.getElementById('errorMessage');
+            const successDiv = document.getElementById('successMessage');
             const loginBtn = document.getElementById('loginBtn');
+            const returnUrl = document.getElementById('returnUrl').value;
             
             // Function to display errors
             const showError = (message) => {
                 errorDiv.textContent = message;
                 errorDiv.classList.remove('hidden');
+                successDiv.classList.add('hidden');
             };
 
-            // Function to hide errors
-            const hideError = () => {
+            // Function to show success
+            const showSuccess = (message) => {
+                successDiv.textContent = message;
+                successDiv.classList.remove('hidden');
                 errorDiv.classList.add('hidden');
             };
 
-            hideError();
+            // Function to hide all messages
+            const hideMessages = () => {
+                errorDiv.classList.add('hidden');
+                successDiv.classList.add('hidden');
+            };
+
+            hideMessages();
             loginBtn.textContent = 'Logging in...';
             loginBtn.disabled = true;
 
             try {
                 // The URL to your backend API endpoint
-                const loginUrl = '../../Backend/auth/login.php'; 
+                const loginUrl = '../../Backend/auth/login.php' + (returnUrl ? '?return_url=' + encodeURIComponent(returnUrl) : '');
                 
                 const response = await fetch(loginUrl, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
                     },
-                    // Send data as JSON, which your backend API expects
                     body: JSON.stringify({ email: email, password: password })
                 });
 
@@ -109,10 +142,18 @@ if (session_status() === PHP_SESSION_NONE) {
                 const data = await response.json();
 
                 if (data.status === 'success') {
-                    // Successful login: Redirect to the dashboard
-                    window.location.href = '../dashboard/user_dashboard.php';
+                    // Check if this is an OAuth redirect
+                    if (data.oauth_redirect && data.redirect_url) {
+                        showSuccess('Login successful! Redirecting to authorization...');
+                        // Redirect to OAuth consent screen
+                        setTimeout(() => {
+                            window.location.href = data.redirect_url;
+                        }, 500);
+                    } else {
+                        // Normal login - go to dashboard
+                        window.location.href = '../dashboard/user_dashboard.php';
+                    }
                 } else {
-                    // Handle API-specific errors (e.g., "Invalid password")
                     showError(data.message || "Login failed. Please try again.");
                 }
 
@@ -122,6 +163,14 @@ if (session_status() === PHP_SESSION_NONE) {
             } finally {
                 loginBtn.textContent = 'Login Securely';
                 loginBtn.disabled = false;
+            }
+        });
+
+        // Check for OAuth return URL on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            const returnUrl = document.getElementById('returnUrl').value;
+            if (returnUrl) {
+                console.log('OAuth flow detected, will redirect after login');
             }
         });
     </script>
