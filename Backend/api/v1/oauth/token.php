@@ -2,8 +2,9 @@
 // Backend/api/v1/oauth/token.php
 // Exchange authorization code for access token
 
-require_once '../../config/db.php';
-require_once '../../config/jwt.php';
+require_once __DIR__ . '/../../../config/db.php';
+require_once __DIR__ . '/../../../config/jwt.php';
+
 
 header('Content-Type: application/json');
 
