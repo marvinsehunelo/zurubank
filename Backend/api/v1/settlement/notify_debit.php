@@ -3,6 +3,7 @@
 // notify_debit.php
 // Release held funds and record interbank settlement
 // UPDATED: Certificate-based verification + ACCOUNT/VOUCHER branch
+// FIXED: Matches actual table structures
 // --------------------------------------------------
 
 header('Content-Type: application/json');
@@ -88,9 +89,13 @@ try {
 
     // ============================================================
     // BRANCH 1: Try to find as ACCOUNT hold first
+    // FIXED: Removed 'asset_type' - does not exist in financial_holds
+    // Actual columns: id, account_id, wallet_id, voucher_id, amount, 
+    // hold_reference, status, requester, signature_verified, expires_at,
+    // debited_at, released_at, created_at, updated_at
     // ============================================================
     $stmt = $pdo->prepare("
-        SELECT id, account_id, amount, status, asset_type
+        SELECT id, account_id, amount, status
         FROM financial_holds
         WHERE hold_reference = :hold_reference
         AND status = 'HELD'
@@ -128,13 +133,13 @@ try {
             throw new Exception("Insufficient balance for account debit");
         }
 
-        // Update hold status
+        // Update hold status - using actual column names
         $stmt = $pdo->prepare("
             UPDATE financial_holds
             SET status = 'DEBITED', 
                 debited_at = NOW(),
-                debited_by = :requester,
-                debit_signature_verified = :sig_verified
+                requester = :requester,
+                signature_verified = :sig_verified
             WHERE id = :hold_id
         ");
         $stmt->execute([
@@ -143,28 +148,28 @@ try {
             'sig_verified' => $isValid ? 1 : 0
         ]);
 
-        // Record in audit
+        // Record in audit - using actual audit_logs columns
         $stmt = $pdo->prepare("
             INSERT INTO audit_logs 
-            (entity_type, entity_id, action, category, severity, performed_by, 
-             performed_by_cert_verified, verification_method, metadata, performed_at)
+            (entity, entity_id, action, category, severity, 
+             old_value, new_value, performed_by, performed_at,
+             ip_address, user_agent)
             VALUES 
-            ('financial_holds', :entity_id, 'DEBIT', 'financial', 'info', :performed_by,
-             :cert_verified, :verification_method, :metadata, NOW())
+            ('financial_holds', :entity_id, 'DEBIT', 'financial', 'info',
+             :old_value, :new_value, :performed_by, NOW(),
+             :ip_address, :user_agent)
         ");
+        
+        $ipAddress = $_SERVER['REMOTE_ADDR'] ?? $_SERVER['HTTP_X_FORWARDED_FOR'] ?? null;
+        $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? null;
+        
         $stmt->execute([
             'entity_id' => $accountHold['id'],
             'performed_by' => $requester,
-            'cert_verified' => $isValid ? 1 : 0,
-            'verification_method' => 'certificate',
-            'metadata' => json_encode([
-                'signature_verified' => $isValid,
-                'settlement_reference' => $settlementReference,
-                'hold_reference' => $holdReference,
-                'amount' => $amount,
-                'account_id' => $accountHold['account_id'],
-                'counterparty_bank' => $counterpartyBank
-            ])
+            'old_value' => json_encode(['status' => 'HELD', 'amount' => $accountHold['amount']]),
+            'new_value' => json_encode(['status' => 'DEBITED', 'amount' => $amount, 'signature_verified' => $isValid]),
+            'ip_address' => $ipAddress,
+            'user_agent' => $userAgent
         ]);
 
         $pdo->commit();
@@ -178,7 +183,6 @@ try {
             "message" => "Account debited successfully",
             "hold_reference" => $holdReference,
             "amount" => (float)$amount,
-            "asset_type" => "ACCOUNT",
             "account_id" => $accountHold['account_id'],
             "total_balance" => floatval($updatedAccount['balance']),
             "held_balance" => floatval($updatedAccount['held_balance'] ?? 0),
@@ -199,7 +203,7 @@ try {
     }
 
     // ============================================================
-    // BRANCH 2: VOUCHER DEBIT PATH (existing logic)
+    // BRANCH 2: VOUCHER DEBIT PATH
     // ============================================================
     error_log("ZURUBANK NOTIFY_DEBIT: No ACCOUNT hold found, trying VOUCHER path");
 
@@ -371,27 +375,27 @@ try {
         'verification_method' => 'certificate'
     ]);
 
-    // Log in audit with signature info
+    // Log in audit with signature info - using actual audit_logs columns
+    $ipAddress = $_SERVER['REMOTE_ADDR'] ?? $_SERVER['HTTP_X_FORWARDED_FOR'] ?? null;
+    $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? null;
+    
     $stmt = $pdo->prepare("
         INSERT INTO audit_logs 
-        (entity_type, entity_id, action, category, severity, performed_by, performed_by_cert_verified, 
-         verification_method, metadata, performed_at)
+        (entity, entity_id, action, category, severity, 
+         old_value, new_value, performed_by, performed_at,
+         ip_address, user_agent)
         VALUES 
-        ('instant_money_vouchers', :entity_id, 'DEBIT', 'financial', 'info', :performed_by, :cert_verified,
-         :verification_method, :metadata, NOW())
+        ('instant_money_vouchers', :entity_id, 'DEBIT', 'financial', 'info',
+         :old_value, :new_value, :performed_by, NOW(),
+         :ip_address, :user_agent)
     ");
     $stmt->execute([
         'entity_id' => $voucher['voucher_id'],
         'performed_by' => $requester,
-        'cert_verified' => $isValid ? 1 : 0,
-        'verification_method' => 'certificate',
-        'metadata' => json_encode([
-            'signature_verified' => $isValid,
-            'settlement_reference' => $settlementReference,
-            'hold_reference' => $holdReference,
-            'amount' => $amount,
-            'counterparty_bank' => $counterpartyBank
-        ])
+        'old_value' => json_encode(['status' => $voucher['status'], 'amount' => $voucher['amount']]),
+        'new_value' => json_encode(['status' => 'redeemed', 'amount' => $amount, 'signature_verified' => $isValid]),
+        'ip_address' => $ipAddress,
+        'user_agent' => $userAgent
     ]);
 
     $pdo->commit();
@@ -410,7 +414,6 @@ try {
         "hold_reference" => $holdReference,
         "amount" => (float)$amount,
         "currency" => $voucher['currency'] ?? 'BWP',
-        "asset_type" => "VOUCHER",
         "counterparty_bank" => $counterpartyBank,
         "settlement_reference" => $settlementReference,
         "journal_id" => $journalId,
