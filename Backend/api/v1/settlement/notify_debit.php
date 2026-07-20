@@ -89,10 +89,6 @@ try {
 
     // ============================================================
     // BRANCH 1: Try to find as ACCOUNT hold first
-    // FIXED: Removed 'asset_type' - does not exist in financial_holds
-    // Actual columns: id, account_id, wallet_id, voucher_id, amount, 
-    // hold_reference, status, requester, signature_verified, expires_at,
-    // debited_at, released_at, created_at, updated_at
     // ============================================================
     $stmt = $pdo->prepare("
         SELECT id, account_id, amount, status
@@ -114,14 +110,14 @@ try {
             throw new Exception("Amount mismatch. Hold: {$accountHold['amount']}, Requested: $amount");
         }
 
-        // Debit the account
+        // Debit the account - using actual columns: balance, held_amount
         $stmt = $pdo->prepare("
             UPDATE accounts
             SET balance = balance - :amount,
-                held_balance = GREATEST(COALESCE(held_balance, 0) - :amount, 0)
+                held_amount = GREATEST(COALESCE(held_amount, 0) - :amount, 0)
             WHERE account_id = :account_id
             AND balance >= :amount
-            RETURNING balance, held_balance
+            RETURNING balance, held_amount
         ");
         $stmt->execute([
             'amount' => $amount,
@@ -133,7 +129,7 @@ try {
             throw new Exception("Insufficient balance for account debit");
         }
 
-        // Update hold status - using actual column names
+        // Update hold status
         $stmt = $pdo->prepare("
             UPDATE financial_holds
             SET status = 'DEBITED', 
@@ -148,7 +144,10 @@ try {
             'sig_verified' => $isValid ? 1 : 0
         ]);
 
-        // Record in audit - using actual audit_logs columns
+        // Record in audit
+        $ipAddress = $_SERVER['REMOTE_ADDR'] ?? $_SERVER['HTTP_X_FORWARDED_FOR'] ?? null;
+        $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? null;
+        
         $stmt = $pdo->prepare("
             INSERT INTO audit_logs 
             (entity, entity_id, action, category, severity, 
@@ -159,10 +158,6 @@ try {
              :old_value, :new_value, :performed_by, NOW(),
              :ip_address, :user_agent)
         ");
-        
-        $ipAddress = $_SERVER['REMOTE_ADDR'] ?? $_SERVER['HTTP_X_FORWARDED_FOR'] ?? null;
-        $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? null;
-        
         $stmt->execute([
             'entity_id' => $accountHold['id'],
             'performed_by' => $requester,
@@ -185,8 +180,8 @@ try {
             "amount" => (float)$amount,
             "account_id" => $accountHold['account_id'],
             "total_balance" => floatval($updatedAccount['balance']),
-            "held_balance" => floatval($updatedAccount['held_balance'] ?? 0),
-            "available_balance" => floatval($updatedAccount['balance']) - floatval($updatedAccount['held_balance'] ?? 0),
+            "held_amount" => floatval($updatedAccount['held_amount'] ?? 0),
+            "available_balance" => floatval($updatedAccount['balance']) - floatval($updatedAccount['held_amount'] ?? 0),
             "requester" => $requester,
             "signature_verified" => $isValid,
             "verification_method" => "certificate",
@@ -375,7 +370,7 @@ try {
         'verification_method' => 'certificate'
     ]);
 
-    // Log in audit with signature info - using actual audit_logs columns
+    // Log in audit with signature info
     $ipAddress = $_SERVER['REMOTE_ADDR'] ?? $_SERVER['HTTP_X_FORWARDED_FOR'] ?? null;
     $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? null;
     
