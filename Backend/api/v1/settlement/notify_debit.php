@@ -4,6 +4,11 @@
 // Release held funds and record interbank settlement
 // UPDATED: Certificate-based verification + ACCOUNT/VOUCHER branch
 // FIXED: Matches actual table structures
+// FIXED: Removed double-decrement of `balance` in the ACCOUNT path —
+//        hold.php already subtracts the hold amount from `balance`
+//        at PLACE_HOLD time. This endpoint only finalizes the hold's
+//        status; it must NOT touch `balance` again, or every debit
+//        silently charges the account twice.
 // --------------------------------------------------
 
 header('Content-Type: application/json');
@@ -103,6 +108,13 @@ try {
     if ($accountHold) {
         // ============================================================
         // ACCOUNT DEBIT PATH
+        // FIXED: hold.php's PLACE_HOLD already did
+        //   UPDATE accounts SET balance = balance - :amount
+        // at hold-placement time. That money is already gone from
+        // `balance`. This finalization step must ONLY flip the
+        // hold's status to DEBITED — it does not touch `balance`
+        // again. The previous version re-ran the same subtraction
+        // here, silently charging the account 2x per debit.
         // ============================================================
         error_log("ZURUBANK NOTIFY_DEBIT: Found ACCOUNT hold ID={$accountHold['id']}, account_id={$accountHold['account_id']}");
 
@@ -110,26 +122,20 @@ try {
             throw new Exception("Amount mismatch. Hold: {$accountHold['amount']}, Requested: $amount");
         }
 
-        // Debit the account - using actual columns: balance, held_amount
+        // Read current balance for the response payload only —
+        // no mutation of `balance` here, it was already applied at
+        // hold time.
         $stmt = $pdo->prepare("
-            UPDATE accounts
-            SET balance = balance - :amount,
-                held_amount = GREATEST(COALESCE(held_amount, 0) - :amount, 0)
-            WHERE account_id = :account_id
-            AND balance >= :amount
-            RETURNING balance, held_amount
+            SELECT balance FROM accounts WHERE account_id = :account_id
         ");
-        $stmt->execute([
-            'amount' => $amount,
-            'account_id' => $accountHold['account_id']
-        ]);
-        $updatedAccount = $stmt->fetch(PDO::FETCH_ASSOC);
+        $stmt->execute(['account_id' => $accountHold['account_id']]);
+        $currentAccount = $stmt->fetch(PDO::FETCH_ASSOC);
 
-        if (!$updatedAccount) {
-            throw new Exception("Insufficient balance for account debit");
+        if (!$currentAccount) {
+            throw new Exception("Account not found during debit finalization: {$accountHold['account_id']}");
         }
 
-        // Update hold status
+        // Finalize the hold
         $stmt = $pdo->prepare("
             UPDATE financial_holds
             SET status = 'DEBITED', 
@@ -169,19 +175,18 @@ try {
 
         $pdo->commit();
 
-        error_log("ZURUBANK NOTIFY_DEBIT: ACCOUNT debit completed - account_id={$accountHold['account_id']}, amount={$amount}");
+        error_log("ZURUBANK NOTIFY_DEBIT: ACCOUNT debit finalized (no balance mutation here) - account_id={$accountHold['account_id']}, amount={$amount}, balance={$currentAccount['balance']}");
 
         $responsePayload = [
             "success" => true,
             "status" => "SUCCESS",
             "debited" => true,
-            "message" => "Account debited successfully",
+            "message" => "Account hold finalized as debited",
             "hold_reference" => $holdReference,
             "amount" => (float)$amount,
             "account_id" => $accountHold['account_id'],
-            "total_balance" => floatval($updatedAccount['balance']),
-            "held_amount" => floatval($updatedAccount['held_amount'] ?? 0),
-            "available_balance" => floatval($updatedAccount['balance']) - floatval($updatedAccount['held_amount'] ?? 0),
+            "total_balance" => floatval($currentAccount['balance']),
+            "available_balance" => floatval($currentAccount['balance']),
             "requester" => $requester,
             "signature_verified" => $isValid,
             "verification_method" => "certificate",
@@ -198,7 +203,9 @@ try {
     }
 
     // ============================================================
-    // BRANCH 2: VOUCHER DEBIT PATH
+    // BRANCH 2: VOUCHER DEBIT PATH (unchanged — vouchers never had
+    // the balance-column double-decrement issue; this path debits
+    // a voucher record, not an accounts.balance column)
     // ============================================================
     error_log("ZURUBANK NOTIFY_DEBIT: No ACCOUNT hold found, trying VOUCHER path");
 
