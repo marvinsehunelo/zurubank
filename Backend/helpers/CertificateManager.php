@@ -143,67 +143,66 @@ class CertificateManager
      * Verify a signed request using certificate
      */
     public function verifySignedRequest(array $request): array
-{
-    $certificate = $request['certificate'] ?? null;
-    $signature = $request['signature'] ?? null;
-    $requester = $request['requester'] ?? 'UNKNOWN';
-    
-    if (!$certificate) {
-        error_log("CertificateManager: No certificate provided from {$requester}");
-        return ['verified' => false, 'message' => 'No certificate provided', 'requester' => $requester];
+    {
+        $certificate = $request['certificate'] ?? null;
+        $signature = $request['signature'] ?? null;
+        $requester = $request['requester'] ?? 'UNKNOWN';
+        
+        if (!$certificate) {
+            error_log("CertificateManager: No certificate provided from {$requester}");
+            return ['verified' => false, 'message' => 'No certificate provided', 'requester' => $requester];
+        }
+        
+        if (!$signature) {
+            error_log("CertificateManager: No signature provided from {$requester}");
+            return ['verified' => false, 'message' => 'No signature provided', 'requester' => $requester];
+        }
+        
+        // Step 1: Verify certificate chains to trusted CA
+        if (!$this->verifyCertificate($certificate)) {
+            error_log("CertificateManager: Certificate not trusted from {$requester}");
+            return ['verified' => false, 'message' => 'Certificate not trusted', 'requester' => $requester];
+        }
+        
+        // Step 2: Extract public key from certificate
+        $publicKey = $this->extractPublicKeyFromCert($certificate);
+        if (!$publicKey) {
+            error_log("CertificateManager: Cannot extract public key from certificate");
+            return ['verified' => false, 'message' => 'Cannot extract public key', 'requester' => $requester];
+        }
+        
+        // Step 3: Prepare payload for verification
+        $payloadToVerify = $request;
+        unset($payloadToVerify['signature']);
+        unset($payloadToVerify['certificate']);
+        unset($payloadToVerify['requester']);
+        ksort($payloadToVerify);
+        
+        $jsonToVerify = json_encode($payloadToVerify, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        $decodedSig = base64_decode($signature);
+        
+        // Step 4: Verify signature
+        $keyResource = openssl_pkey_get_public($publicKey);
+        if (!$keyResource) {
+            error_log("CertificateManager: Invalid public key format");
+            return ['verified' => false, 'message' => 'Invalid public key', 'requester' => $requester];
+        }
+        
+        $result = openssl_verify($jsonToVerify, $decodedSig, $keyResource, OPENSSL_ALGO_SHA256);
+        $isValid = ($result === 1);
+        
+        error_log("CertificateManager: Request from {$requester} - Signature: " . ($isValid ? "VALID ✓" : "INVALID ✗"));
+        
+        if ($result === -1) {
+            error_log("CertificateManager: OpenSSL error: " . openssl_error_string());
+        }
+                
+        return [
+            'verified' => $isValid,
+            'requester' => $requester,
+            'message' => $isValid ? 'Signature verified' : 'Invalid signature'
+        ];
     }
-    
-    if (!$signature) {
-        error_log("CertificateManager: No signature provided from {$requester}");
-        return ['verified' => false, 'message' => 'No signature provided', 'requester' => $requester];
-    }
-    
-    // Step 1: Verify certificate chains to trusted CA
-    if (!$this->verifyCertificate($certificate)) {
-        error_log("CertificateManager: Certificate not trusted from {$requester}");
-        return ['verified' => false, 'message' => 'Certificate not trusted', 'requester' => $requester];
-    }
-    
-    // Step 2: Extract public key from certificate
-    $publicKey = $this->extractPublicKeyFromCert($certificate);
-    if (!$publicKey) {
-        error_log("CertificateManager: Cannot extract public key from certificate");
-        return ['verified' => false, 'message' => 'Cannot extract public key', 'requester' => $requester];
-    }
-    
-    // 🔥 FIX: Prepare payload for verification - DO NOT remove 'requester'
-    // The 'requester' is part of the signed payload
-    $payloadToVerify = $request;
-    unset($payloadToVerify['signature']);
-    unset($payloadToVerify['certificate']);
-    // ❌ REMOVED: unset($payloadToVerify['requester']);
-    ksort($payloadToVerify);
-    
-    $jsonToVerify = json_encode($payloadToVerify, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-    $decodedSig = base64_decode($signature);
-    
-    // Step 4: Verify signature
-    $keyResource = openssl_pkey_get_public($publicKey);
-    if (!$keyResource) {
-        error_log("CertificateManager: Invalid public key format");
-        return ['verified' => false, 'message' => 'Invalid public key', 'requester' => $requester];
-    }
-    
-    $result = openssl_verify($jsonToVerify, $decodedSig, $keyResource, OPENSSL_ALGO_SHA256);
-    $isValid = ($result === 1);
-    
-    error_log("CertificateManager: Request from {$requester} - Signature: " . ($isValid ? "VALID ✓" : "INVALID ✗"));
-    
-    if ($result === -1) {
-        error_log("CertificateManager: OpenSSL error: " . openssl_error_string());
-    }
-            
-    return [
-        'verified' => $isValid,
-        'requester' => $requester,
-        'message' => $isValid ? 'Signature verified' : 'Invalid signature'
-    ];
-}
     
   /**
  * Create signed request with certificate (for outgoing)
