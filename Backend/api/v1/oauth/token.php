@@ -32,8 +32,13 @@ if ($client_id !== 'VOUCHMORPH_APP_ID' || $client_secret !== 'YOUR_BANK_SECRET')
 }
 
 if ($grant_type === 'authorization_code') {
-    // Validate authorization code
-    $stmt = $pdo->prepare("SELECT * FROM oauth_auth_codes WHERE code = ? AND expires_at > NOW() AND used = 0");
+    // ============================================================
+    // FIX 1: Cast to boolean, not integer (used = false)
+    // FIX 2: Use Postgres-compatible NOW() without MySQL DATE_ADD
+    // ============================================================
+    
+    // Validate authorization code — cast to boolean, not integer
+    $stmt = $pdo->prepare("SELECT * FROM oauth_auth_codes WHERE code = ? AND expires_at > NOW() AND used = false");
     $stmt->execute([$code]);
     $auth_code = $stmt->fetch(PDO::FETCH_ASSOC);
     
@@ -43,8 +48,8 @@ if ($grant_type === 'authorization_code') {
         exit;
     }
     
-    // Mark code as used
-    $stmt = $pdo->prepare("UPDATE oauth_auth_codes SET used = 1 WHERE code = ?");
+    // Mark code as used — boolean, not integer
+    $stmt = $pdo->prepare("UPDATE oauth_auth_codes SET used = true WHERE code = ?");
     $stmt->execute([$code]);
     
     // Generate access token (JWT)
@@ -54,9 +59,9 @@ if ($grant_type === 'authorization_code') {
         'exp' => time() + 3600
     ]);
     
-    // Generate refresh token
+    // Generate refresh token — Postgres interval syntax, not MySQL's DATE_ADD
     $refresh_token = bin2hex(random_bytes(32));
-    $stmt = $pdo->prepare("INSERT INTO oauth_refresh_tokens (token, user_id, client_id, expires_at) VALUES (?, ?, ?, DATE_ADD(NOW(), INTERVAL 30 DAY))");
+    $stmt = $pdo->prepare("INSERT INTO oauth_refresh_tokens (token, user_id, client_id, expires_at) VALUES (?, ?, ?, NOW() + INTERVAL '30 days')");
     $stmt->execute([$refresh_token, $auth_code['user_id'], $client_id]);
     
     echo json_encode([
@@ -68,8 +73,11 @@ if ($grant_type === 'authorization_code') {
     ]);
     
 } elseif ($grant_type === 'refresh_token') {
-    // Refresh token logic
-    $stmt = $pdo->prepare("SELECT * FROM oauth_refresh_tokens WHERE token = ? AND expires_at > NOW() AND revoked = 0");
+    // ============================================================
+    // FIX 3: Boolean fix for refresh token branch
+    // ============================================================
+    
+    $stmt = $pdo->prepare("SELECT * FROM oauth_refresh_tokens WHERE token = ? AND expires_at > NOW() AND revoked = false");
     $stmt->execute([$refresh_token]);
     $token = $stmt->fetch(PDO::FETCH_ASSOC);
     
