@@ -307,6 +307,21 @@ try {
     // purpose: `reference` stores the settlement reference, and
     // `swap_made_at` (the table's own completion timestamp) stands
     // in for the missing `updated_at`.
+    //
+    // FIXED (this pass, #2): removed `redeemed_by = :requester`.
+    // redeemed_by is an INTEGER column (a user_id foreign key, same
+    // as created_by, which is later bound straight into an integer
+    // column in the transactions insert a few lines down). $requester
+    // here is the certificate-verified caller's NAME (e.g.
+    // "VOUCHMORPH"), not a numeric user id - binding it produced:
+    //   SQLSTATE[22P02]: invalid input syntax for type integer: "VOUCHMORPH"
+    // Conceptually this also doesn't belong here: an interbank
+    // settlement triggered by a certificate-verified request isn't
+    // "redeemed by a user account" at all, so there's no correct
+    // numeric value to put in its place - just leave it NULL. The
+    // requester is still fully tracked via audit_logs.performed_by
+    // and the new_value JSON blob below, which are text columns and
+    // were never the problem.
     // ============================================================
     
     // Mark voucher as redeemed (used)
@@ -314,13 +329,11 @@ try {
         UPDATE instant_money_vouchers 
         SET status = 'redeemed', 
             redeemed_at = NOW(),
-            redeemed_by = :requester,
             reference = :settlement_ref,
             swap_made_at = NOW()
         WHERE voucher_id = :voucher_id
     ");
     $stmt->execute([
-        'requester' => $requester,
         'settlement_ref' => $settlementReference,
         'voucher_id' => $voucher['voucher_id']
     ]);
