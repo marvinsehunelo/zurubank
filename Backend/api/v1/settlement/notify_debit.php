@@ -9,6 +9,7 @@
 //        at PLACE_HOLD time. This endpoint only finalizes the hold's
 //        status; it must NOT touch `balance` again, or every debit
 //        silently charges the account twice.
+// FIXED: Removed redeemed_by_cert_verified column (does not exist in table)
 // --------------------------------------------------
 
 header('Content-Type: application/json');
@@ -278,20 +279,24 @@ try {
         throw new Exception("Amount mismatch. Voucher: {$voucher['amount']}, Requested: $amount");
     }
 
+    // ============================================================
+    // FIXED: REMOVED redeemed_by_cert_verified column
+    // The column does not exist in instant_money_vouchers table
+    // Certificate verification is tracked via redeemed_by and audit logs
+    // ============================================================
+    
     // Mark voucher as redeemed (used)
     $stmt = $pdo->prepare("
         UPDATE instant_money_vouchers 
         SET status = 'redeemed', 
             redeemed_at = NOW(),
             redeemed_by = :requester,
-            redeemed_by_cert_verified = :cert_verified,
             settlement_reference = :settlement_ref,
             updated_at = NOW()
         WHERE voucher_id = :voucher_id
     ");
     $stmt->execute([
         'requester' => $requester,
-        'cert_verified' => $isValid ? 1 : 0,
         'settlement_ref' => $settlementReference,
         'voucher_id' => $voucher['voucher_id']
     ]);
