@@ -365,16 +365,16 @@ try {
         error_log("ZURUBANK NOTIFY_DEBIT: Created new counterparty bank record for: {$counterpartyBank}");
     }
 
-    // Insert into journals table (matches actual schema)
-$stmt = $this->db->prepare("
+// Insert into journals table (matches actual schema)
+$stmt = $pdo->prepare("
     INSERT INTO journals (reference, description, created_at)
     VALUES (:reference, :description, NOW())
 ");
 $stmt->execute([
-    ':reference' => $reference,
-    ':description' => $description
+    ':reference' => $settlementReference,
+    ':description' => "Voucher {$voucher['voucher_number']} settlement - {$counterpartyBank}"
 ]);
-    $journalId = $stmt->fetchColumn();
+$journalId = $pdo->lastInsertId();
 
     // Record in swap_ledger
     $holdingAccount = $voucher['holding_account'] ?? 'VOUCHER-SUSPENSE';
