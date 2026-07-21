@@ -395,27 +395,23 @@ $journalId = $pdo->lastInsertId();
     ]);
 
     // Create transaction record
-    $stmt = $pdo->prepare("
-        INSERT INTO transactions 
-        (user_id, account_id, from_account, to_account, type, amount, reference, description, status, 
-         requester, signature_verified, verification_method, created_at)
-        VALUES 
-        (:user_id, :account_id, :from_account, :to_account, :type, :amount, :reference, :description, 'completed', 
-         :requester, :sig_verified, :verification_method, NOW())
-    ");
-    $stmt->execute([
-        'user_id' => $voucher['created_by'] ?? 1,
-        'account_id' => 0,
-        'from_account' => $holdingAccount,
-        'to_account' => "BANK:{$counterpartyBank}",
-        'type' => 'interbank_settlement',
-        'amount' => $amount,
-        'reference' => $settlementReference,
-        'description' => "Voucher {$voucher['voucher_number']} settlement (authorized by {$requester})",
-        'requester' => $requester,
-        'sig_verified' => $isValid ? 1 : 0,
-        'verification_method' => 'certificate'
-    ]);
+    // Create transaction record - FIXED: Only use columns that exist
+$stmt = $pdo->prepare("
+    INSERT INTO transactions 
+    (user_id, account_id, from_account, to_account, type, amount, reference, description, status, created_at)
+    VALUES 
+    (:user_id, :account_id, :from_account, :to_account, :type, :amount, :reference, :description, 'completed', NOW())
+");
+$stmt->execute([
+    'user_id' => (int)($voucher['created_by'] ?? 1),
+    'account_id' => 0,
+    'from_account' => (string)$holdingAccount,
+    'to_account' => (string)"BANK:{$counterpartyBank}",
+    'type' => (string)'interbank_settlement',
+    'amount' => (float)$amount,
+    'reference' => (string)$settlementReference,
+    'description' => (string)"Voucher {$voucher['voucher_number']} settlement (authorized by {$requester})"
+]);
 
     // Log in audit with signature info
     $ipAddress = $_SERVER['REMOTE_ADDR'] ?? $_SERVER['HTTP_X_FORWARDED_FOR'] ?? null;
