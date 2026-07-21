@@ -365,17 +365,15 @@ try {
         error_log("ZURUBANK NOTIFY_DEBIT: Created new counterparty bank record for: {$counterpartyBank}");
     }
 
-    // Create a journal entry for this settlement
-    $stmt = $pdo->prepare("
-        INSERT INTO journals (reference, description, created_by, created_at)
-        VALUES (:reference, :description, :created_by, NOW())
-        RETURNING journal_id
-    ");
-    $stmt->execute([
-        'reference' => $settlementReference,
-        'description' => "Settlement of voucher {$voucher['voucher_number']} used at {$counterpartyBank} (requested by {$requester})",
-        'created_by' => $requester
-    ]);
+    // Insert into journals table (matches actual schema)
+$stmt = $this->db->prepare("
+    INSERT INTO journals (reference, description, created_at)
+    VALUES (:reference, :description, NOW())
+");
+$stmt->execute([
+    ':reference' => $reference,
+    ':description' => $description
+]);
     $journalId = $stmt->fetchColumn();
 
     // Record in swap_ledger
