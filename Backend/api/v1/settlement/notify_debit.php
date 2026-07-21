@@ -10,6 +10,24 @@
 //        status; it must NOT touch `balance` again, or every debit
 //        silently charges the account twice.
 // FIXED: Removed redeemed_by_cert_verified column (does not exist in table)
+// FIXED (this pass): the voucher UPDATE was writing to two columns
+//        that do NOT exist on instant_money_vouchers -
+//        `settlement_reference` and `updated_at`. Confirmed against
+//        the real column list:
+//          voucher_id, amount, currency, created_by, recipient_phone,
+//          created_at, voucher_number, voucher_pin, redeemed_by,
+//          voucher_created_at, voucher_expires_at, sat_purchased,
+//          sat_fee_paid_by, sat_expires_at, redeemed_at, swap_made_at,
+//          holding_account, status, origin, external_reference,
+//          source_institution, source_hold_reference, reference,
+//          source_asset_type, code_hash
+//        Swapped to the columns that actually exist and serve the
+//        same purpose: `reference` (generic reference column) holds
+//        the settlement reference, and `swap_made_at` (the table's
+//        own "when did this swap complete" timestamp) replaces the
+//        nonexistent `updated_at`. Every other query in this file
+//        was already checked against this list and only selects/
+//        reads real columns, so no other changes were needed.
 // --------------------------------------------------
 
 header('Content-Type: application/json');
@@ -281,8 +299,14 @@ try {
 
     // ============================================================
     // FIXED: REMOVED redeemed_by_cert_verified column
-    // The column does not exist in instant_money_vouchers table
-    // Certificate verification is tracked via redeemed_by and audit logs
+    // The column does not exist in instant_money_vouchers table.
+    //
+    // FIXED (this pass): the two columns previously written here —
+    // `settlement_reference` and `updated_at` — also do not exist
+    // on this table. Replaced with real columns that serve the same
+    // purpose: `reference` stores the settlement reference, and
+    // `swap_made_at` (the table's own completion timestamp) stands
+    // in for the missing `updated_at`.
     // ============================================================
     
     // Mark voucher as redeemed (used)
@@ -291,8 +315,8 @@ try {
         SET status = 'redeemed', 
             redeemed_at = NOW(),
             redeemed_by = :requester,
-            settlement_reference = :settlement_ref,
-            updated_at = NOW()
+            reference = :settlement_ref,
+            swap_made_at = NOW()
         WHERE voucher_id = :voucher_id
     ");
     $stmt->execute([
