@@ -13,6 +13,7 @@ ini_set('output_buffering', '4096');
 require_once __DIR__ . '/../../../config/db.php';
 require_once __DIR__ . '/../../../helpers/crypto.php';
 require_once __DIR__ . '/../../../helpers/CertificateManager.php';
+require_once __DIR__ . '/../../../helpers/sms.php';  // ← ADD THIS
 
 header('Content-Type: application/json');
 
@@ -296,6 +297,39 @@ try {
 
     error_log("ZURUBANK: Voucher generated successfully - Number: {$voucherNumber}");
 
+    // ============================================================
+    // SEND SMS WITH VOUCHER DETAILS
+    // ============================================================
+    $smsSent = false;
+    $smsError = null;
+
+    if (!empty($normalizedPhone)) {
+        $smsMessage = "ZuruBank Cashout Voucher\n"
+            . "Amount: {$currency} {$amount}\n"
+            . "Voucher: {$voucherNumber}\n"
+            . "PIN: {$voucherPin}\n"
+            . "Auth Code: {$authCode}\n"
+            . "Expires: " . date('d M Y H:i', strtotime($voucherExpiresAt)) . "\n"
+            . "Visit any ZuruBank ATM or Agent to cash out.";
+
+        error_log("ZURUBANK: Attempting to send SMS to {$normalizedPhone}");
+        
+        try {
+            $smsSent = sendSms($normalizedPhone, $smsMessage);
+            if ($smsSent) {
+                error_log("ZURUBANK: SMS sent successfully to {$normalizedPhone}");
+            } else {
+                $smsError = "SMS sending failed - check logs";
+                error_log("ZURUBANK: SMS failed to send to {$normalizedPhone}");
+            }
+        } catch (Exception $e) {
+            $smsError = $e->getMessage();
+            error_log("ZURUBANK: SMS exception: " . $e->getMessage());
+        }
+    } else {
+        error_log("ZURUBANK: No phone number provided, SMS skipped");
+    }
+
     // Response Structure
     $responsePayload = [
         'status' => 'SUCCESS',
@@ -313,6 +347,8 @@ try {
         'signature_verified' => $isValid,
         'message' => 'ATM token generated successfully',
         'instructions' => $instructions,
+        'sms_sent' => $smsSent,
+        'sms_error' => $smsError,
         'timestamp' => time()
     ];
     
