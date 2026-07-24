@@ -9,7 +9,7 @@ function sendSms(string $to, string $message): bool
     $config = [
         'base_url' => 'https://cazacom-production.up.railway.app',
         'endpoint' => '/api.php?path=sms/send',
-        'sender' => 'SACCUSSALIS',
+        'sender' => 'ZURUBANK',
         'timeout' => 30,
         'api_key_header' => 'X-API-Key',
         'api_key' => getenv('CAZACOM_API_KEY')
