@@ -141,12 +141,21 @@ class CertificateManager
     
     /**
      * Verify a signed request using certificate
+     * 
+     * CRITICAL FIX: This method now removes 'requester' BEFORE verification
+     * because VouchMorph adds 'requester' AFTER signing.
      */
     public function verifySignedRequest(array $request): array
     {
         $certificate = $request['certificate'] ?? null;
         $signature = $request['signature'] ?? null;
         $requester = $request['requester'] ?? 'UNKNOWN';
+        
+        error_log("=== ZURUBANK CertificateManager::verifySignedRequest START ===");
+        error_log("Requester: {$requester}");
+        error_log("Has certificate: " . ($certificate ? 'YES' : 'NO'));
+        error_log("Has signature: " . ($signature ? 'YES' : 'NO'));
+        error_log("Request keys: " . implode(', ', array_keys($request)));
         
         if (!$certificate) {
             error_log("CertificateManager: No certificate provided from {$requester}");
@@ -172,6 +181,8 @@ class CertificateManager
         }
         
         // Step 3: Prepare payload for verification
+        // CRITICAL: Remove signature, certificate, AND requester
+        // VouchMorph signs WITHOUT requester (it's added after signing)
         $payloadToVerify = $request;
         unset($payloadToVerify['signature']);
         unset($payloadToVerify['certificate']);
@@ -180,6 +191,11 @@ class CertificateManager
         
         $jsonToVerify = json_encode($payloadToVerify, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         $decodedSig = base64_decode($signature);
+        
+        // DEBUG: Log exactly what's being verified
+        error_log("ZURUBANK CertificateManager: VERIFYING JSON: " . $jsonToVerify);
+        error_log("ZURUBANK CertificateManager: JSON length: " . strlen($jsonToVerify));
+        error_log("ZURUBANK CertificateManager: Signature decoded length: " . strlen($decodedSig));
         
         // Step 4: Verify signature
         $keyResource = openssl_pkey_get_public($publicKey);
@@ -191,12 +207,28 @@ class CertificateManager
         $result = openssl_verify($jsonToVerify, $decodedSig, $keyResource, OPENSSL_ALGO_SHA256);
         $isValid = ($result === 1);
         
-        error_log("CertificateManager: Request from {$requester} - Signature: " . ($isValid ? "VALID ✓" : "INVALID ✗"));
+        error_log("ZURUBANK CertificateManager: openssl_verify result: " . $result . " (1=valid, 0=invalid, -1=error)");
+        error_log("ZURUBANK CertificateManager: Request from {$requester} - Signature: " . ($isValid ? "VALID ✓" : "INVALID ✗"));
         
         if ($result === -1) {
-            error_log("CertificateManager: OpenSSL error: " . openssl_error_string());
+            error_log("ZURUBANK CertificateManager: OpenSSL error: " . openssl_error_string());
         }
-                
+        
+        // Log the comparison if verification failed
+        if (!$isValid) {
+            error_log("ZURUBANK CertificateManager: VERIFICATION FAILED - comparing signed vs verified");
+            error_log("ZURUBANK CertificateManager: Signed JSON (without requester): " . $jsonToVerify);
+            
+            // Get the original payload that was sent (for comparison)
+            $originalPayload = $request;
+            unset($originalPayload['signature']);
+            unset($originalPayload['certificate']);
+            // Keep requester for comparison
+            ksort($originalPayload);
+            $originalJson = json_encode($originalPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            error_log("ZURUBANK CertificateManager: Original payload JSON (with requester): " . $originalJson);
+        }
+        
         return [
             'verified' => $isValid,
             'requester' => $requester,
@@ -204,108 +236,111 @@ class CertificateManager
         ];
     }
     
-  /**
- * Create signed request with certificate (for outgoing)
- * Uses repaired key with automatic retry
- */
-public function createSignedRequest(array $payload, string $requester): array
-{
-    error_log("=== CREATE SIGNED REQUEST START ===");
-    error_log("Requester: {$requester}");
-    error_log("MyName: {$this->myName}");
-    error_log("Has private key: " . ($this->myPrivateKey ? 'YES' : 'NO'));
-    error_log("Has certificate: " . ($this->myCertificate ? 'YES' : 'NO'));
-    error_log("Payload keys: " . implode(', ', array_keys($payload)));
-    
-    if (!$this->myPrivateKey || !$this->myCertificate) {
-        error_log("CertificateManager: Cannot sign request - missing private key or certificate for {$this->myName}");
-        error_log("Private key missing: " . ($this->myPrivateKey ? 'NO' : 'YES'));
-        error_log("Certificate missing: " . ($this->myCertificate ? 'NO' : 'YES'));
-        return $payload;
-    }
-    
-    $timestamp = time();
-    $payloadWithTimestamp = array_merge($payload, ['timestamp' => $timestamp]);
-    ksort($payloadWithTimestamp);
-    
-    $jsonToSign = json_encode($payloadWithTimestamp, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-    error_log("JSON to sign length: " . strlen($jsonToSign));
-    error_log("JSON to sign preview: " . substr($jsonToSign, 0, 200));
-    
-    $signature = '';
-    
-    // Load private key - try multiple times with different formats
-    error_log("Attempting to load private key...");
-    error_log("Private key format check - starts with BEGIN: " . (strpos($this->myPrivateKey, 'BEGIN PRIVATE KEY') !== false ? 'YES' : 'NO'));
-    
-    $keyResource = openssl_pkey_get_private($this->myPrivateKey);
-    
-    if (!$keyResource) {
-        error_log("CertificateManager: Primary key load FAILED");
+    /**
+     * Create signed request with certificate (for outgoing)
+     * Uses repaired key with automatic retry
+     */
+    public function createSignedRequest(array $payload, string $requester): array
+    {
+        error_log("=== ZURUBANK CREATE SIGNED REQUEST START ===");
+        error_log("Requester: {$requester}");
+        error_log("MyName: {$this->myName}");
+        error_log("Has private key: " . ($this->myPrivateKey ? 'YES' : 'NO'));
+        error_log("Has certificate: " . ($this->myCertificate ? 'YES' : 'NO'));
+        error_log("Payload keys: " . implode(', ', array_keys($payload)));
         
-        // Log OpenSSL errors
-        $opensslErrors = [];
-        while ($err = openssl_error_string()) {
-            $opensslErrors[] = $err;
-            error_log("OpenSSL Error: " . $err);
+        if (!$this->myPrivateKey || !$this->myCertificate) {
+            error_log("CertificateManager: Cannot sign request - missing private key or certificate for {$this->myName}");
+            error_log("Private key missing: " . ($this->myPrivateKey ? 'NO' : 'YES'));
+            error_log("Certificate missing: " . ($this->myCertificate ? 'NO' : 'YES'));
+            return $payload;
         }
         
-        error_log("CertificateManager: Attempting emergency repair...");
+        $timestamp = time();
+        $payloadWithTimestamp = array_merge($payload, ['timestamp' => $timestamp]);
+        ksort($payloadWithTimestamp);
         
-        // Emergency repair - extract and rebuild again
-        $base64Content = preg_replace('/-----BEGIN PRIVATE KEY-----/', '', $this->myPrivateKey);
-        $base64Content = preg_replace('/-----END PRIVATE KEY-----/', '', $this->myPrivateKey);
-        $base64Content = preg_replace('/[^A-Za-z0-9+\/=]/', '', $base64Content);
+        $jsonToSign = json_encode($payloadWithTimestamp, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        error_log("ZURUBANK JSON to sign length: " . strlen($jsonToSign));
+        error_log("ZURUBANK JSON to sign preview: " . substr($jsonToSign, 0, 200));
         
-        error_log("Emergency repair - Base64 length: " . strlen($base64Content));
+        $signature = '';
         
-        $chunks = str_split($base64Content, 64);
-        $repairedKey = "-----BEGIN PRIVATE KEY-----\n" . implode("\n", $chunks) . "\n-----END PRIVATE KEY-----";
+        // Load private key - try multiple times with different formats
+        error_log("Attempting to load private key...");
+        error_log("Private key format check - starts with BEGIN: " . (strpos($this->myPrivateKey, 'BEGIN PRIVATE KEY') !== false ? 'YES' : 'NO'));
         
-        error_log("Emergency repair - New key length: " . strlen($repairedKey));
-        error_log("Emergency repair - Key preview: " . substr($repairedKey, 0, 100));
-                
-        if ($keyResource) {
-            // Save the repaired key for future use
-            $this->myPrivateKey = $repairedKey;
-            error_log("CertificateManager: Emergency repair SUCCESSFUL");
-        } else {
-            error_log("CertificateManager: Emergency repair FAILED");
+        $keyResource = openssl_pkey_get_private($this->myPrivateKey);
+        
+        if (!$keyResource) {
+            error_log("CertificateManager: Primary key load FAILED");
+            
+            // Log OpenSSL errors
+            $opensslErrors = [];
             while ($err = openssl_error_string()) {
-                error_log("OpenSSL Error after repair: " . $err);
+                $opensslErrors[] = $err;
+                error_log("OpenSSL Error: " . $err);
             }
+            
+            error_log("CertificateManager: Attempting emergency repair...");
+            
+            // Emergency repair - extract and rebuild again
+            $base64Content = preg_replace('/-----BEGIN PRIVATE KEY-----/', '', $this->myPrivateKey);
+            $base64Content = preg_replace('/-----END PRIVATE KEY-----/', '', $this->myPrivateKey);
+            $base64Content = preg_replace('/[^A-Za-z0-9+\/=]/', '', $base64Content);
+            
+            error_log("Emergency repair - Base64 length: " . strlen($base64Content));
+            
+            $chunks = str_split($base64Content, 64);
+            $repairedKey = "-----BEGIN PRIVATE KEY-----\n" . implode("\n", $chunks) . "\n-----END PRIVATE KEY-----";
+            
+            error_log("Emergency repair - New key length: " . strlen($repairedKey));
+            error_log("Emergency repair - Key preview: " . substr($repairedKey, 0, 100));
+            
+            // Try loading the repaired key
+            $keyResource = openssl_pkey_get_private($repairedKey);
+            if ($keyResource) {
+                // Save the repaired key for future use
+                $this->myPrivateKey = $repairedKey;
+                error_log("CertificateManager: Emergency repair SUCCESSFUL");
+            } else {
+                error_log("CertificateManager: Emergency repair FAILED");
+                while ($err = openssl_error_string()) {
+                    error_log("OpenSSL Error after repair: " . $err);
+                }
+            }
+        } else {
+            error_log("CertificateManager: Primary key load SUCCESSFUL");
         }
-    } else {
-        error_log("CertificateManager: Primary key load SUCCESSFUL");
+        
+        if (!$keyResource) {
+            error_log("CertificateManager: Private key load FAILED after all attempts");
+            error_log("Key first 40 chars: " . substr($this->myPrivateKey, 0, 40));
+            error_log("Key last 40 chars: " . substr($this->myPrivateKey, -40));
+            return $payload;
+        }
+        
+        error_log("Calling openssl_sign...");
+        $signResult = openssl_sign($jsonToSign, $signature, $keyResource, OPENSSL_ALGO_SHA256);
+        error_log("openssl_sign result: " . ($signResult ? 'SUCCESS' : 'FAILURE'));
+        error_log("Generated signature length: " . strlen($signature));
+        
+        // Clean up key resource
+        openssl_free_key($keyResource);
+        
+        // Add requester AFTER signing (it's NOT part of the signed payload)
+        $signedPayload = array_merge($payloadWithTimestamp, [
+            'signature' => base64_encode($signature),
+            'requester' => $requester,  // ← Added AFTER signing
+            'certificate' => $this->myCertificate
+        ]);
+        
+        error_log("=== ZURUBANK CREATE SIGNED REQUEST COMPLETE ===");
+        error_log("Signature base64 length: " . strlen(base64_encode($signature)));
+        error_log("Certificate length: " . strlen($this->myCertificate));
+        
+        return $signedPayload;
     }
-    
-    if (!$keyResource) {
-        error_log("CertificateManager: Private key load FAILED after all attempts");
-        error_log("Key first 40 chars: " . substr($this->myPrivateKey, 0, 40));
-        error_log("Key last 40 chars: " . substr($this->myPrivateKey, -40));
-        return $payload;
-    }
-    
-    error_log("Calling openssl_sign...");
-    $signResult = openssl_sign($jsonToSign, $signature, $keyResource, OPENSSL_ALGO_SHA256);
-    error_log("openssl_sign result: " . ($signResult ? 'SUCCESS' : 'FAILURE'));
-    error_log("Generated signature length: " . strlen($signature));
-    
-    // Clean up key resource
-    openssl_free_key($keyResource);
-    
-    $signedPayload = array_merge($payloadWithTimestamp, [
-        'signature' => base64_encode($signature),
-        'requester' => $requester,
-        'certificate' => $this->myCertificate
-    ]);
-    
-    error_log("=== CREATE SIGNED REQUEST COMPLETE ===");
-    error_log("Signature base64 length: " . strlen(base64_encode($signature)));
-    error_log("Certificate length: " . strlen($this->myCertificate));
-    
-    return $signedPayload;
-}
     
     public function isConfigured(): bool
     {
