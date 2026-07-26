@@ -11,10 +11,10 @@
  */
 class CertificateManager
 {
-    private ?string $caCert = null;
-    private ?string $myPrivateKey = null;
-    private ?string $myCertificate = null;
-    private ?string $myName = null;
+    public ?string $caCert = null;
+    public ?string $myPrivateKey = null;
+    public ?string $myCertificate = null;
+    public ?string $myName = null;
     
     public function __construct(?string $vouchmorphpartnerName = null)
     {
