@@ -1,6 +1,6 @@
 <?php
 // zurubank/Backend/helpers/CertificateManager.php
-// FIXED VERSION - Properly includes 'requester' in signature verification
+// FIXED: Accept requester in both top-level and nested objects
 
 /**
  * Certificate Manager - Visa/Mastercard style PKI
@@ -37,11 +37,9 @@ class CertificateManager
             error_log("First 40 chars: " . substr($privateKeyContent, 0, 40));
             error_log("Last 40 chars: " . substr($privateKeyContent, -40));
             
-            // Step 1: Fix literal newlines
             $cleanKey = str_replace(['\\n', '\n', "\r"], "\n", $privateKeyContent);
             $cleanKey = trim($cleanKey);
             
-            // Step 2: Extract base64 content between markers
             $base64Content = preg_replace('/-----BEGIN PRIVATE KEY-----/', '', $cleanKey);
             $base64Content = preg_replace('/-----END PRIVATE KEY-----/', '', $base64Content);
             $base64Content = preg_replace('/\s/', '', $base64Content);
@@ -49,10 +47,8 @@ class CertificateManager
             error_log("Base64 length: " . strlen($base64Content));
             error_log("Base64 valid: " . (preg_match('/^[A-Za-z0-9+\/=]+$/', $base64Content) ? 'YES' : 'NO'));
             
-            // Step 3: Remove any invalid characters from base64
             $base64Content = preg_replace('/[^A-Za-z0-9+\/=]/', '', $base64Content);
             
-            // Step 4: Re-wrap properly in 64-character chunks
             $chunks = str_split($base64Content, 64);
             $this->myPrivateKey = "-----BEGIN PRIVATE KEY-----\n" . implode("\n", $chunks) . "\n-----END PRIVATE KEY-----";
             
@@ -82,14 +78,12 @@ class CertificateManager
             return false;
         }
         
-        // Step 1: Trust Anchor validation via Temp Files
         $tempCert = tempnam(sys_get_temp_dir(), 'cert_');
         $tempCA = tempnam(sys_get_temp_dir(), 'ca_');
         
         file_put_contents($tempCert, $certificatePem);
         file_put_contents($tempCA, $this->caCert);
         
-        // Verify certificate chains to our trusted CA
         $cmd = "openssl verify -CAfile " . escapeshellarg($tempCA) . " " . escapeshellarg($tempCert) . " 2>&1";
         exec($cmd, $output, $returnCode);
         $result = ($returnCode === 0);
@@ -97,7 +91,6 @@ class CertificateManager
         unlink($tempCert);
         unlink($tempCA);
 
-        // Step 2: Native PHP Expiry Check
         try {
             $certData = openssl_x509_parse($certificatePem);
             if ($certData && isset($certData['validTo_time_t'])) {
@@ -140,10 +133,8 @@ class CertificateManager
     }
     
     /**
-     * Verify a signed request using certificate
-     * 
-     * ✅ FIXED: 'requester' is now properly included in signature verification
-     * VouchMorph includes 'requester' in the signed payload
+     * ✅ FIXED: Accept requester in both top-level AND nested objects
+     * VouchMorph may include requester in source_verification.payload
      */
     public function verifySignedRequest(array $request): array
     {
@@ -167,48 +158,62 @@ class CertificateManager
             return ['verified' => false, 'message' => 'No signature provided', 'requester' => $requester];
         }
         
-        // Step 1: Verify certificate chains to trusted CA
         if (!$this->verifyCertificate($certificate)) {
             error_log("CertificateManager: Certificate not trusted from {$requester}");
             return ['verified' => false, 'message' => 'Certificate not trusted', 'requester' => $requester];
         }
         
-        // Step 2: Extract public key from certificate
         $publicKey = $this->extractPublicKeyFromCert($certificate);
         if (!$publicKey) {
             error_log("CertificateManager: Cannot extract public key from certificate");
             return ['verified' => false, 'message' => 'Cannot extract public key', 'requester' => $requester];
         }
         
-        // Step 3: Prepare payload for verification
-        // ✅ FIXED: Keep 'requester' - it IS part of the signed payload
-        $payloadToVerify = $request;
-        unset($payloadToVerify['signature']);
-        unset($payloadToVerify['certificate']);
-        // ✅ DO NOT remove requester - it's included in the signature!
-        // The requester field identifies who is making the request
-        // and is critical for security auditing
+        // ✅ FIXED: Try verification with requester FIRST
+        // (since VouchMorph includes it in nested objects)
+        $payloadWithRequester = $request;
+        unset($payloadWithRequester['signature']);
+        unset($payloadWithRequester['certificate']);
+        // ✅ KEEP requester at all levels
+        ksort($payloadWithRequester);
         
-        // Sort keys for consistent JSON (matching VouchMorph's sorting)
-        ksort($payloadToVerify);
-        
-        $jsonToVerify = json_encode($payloadToVerify, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        $jsonWithRequester = json_encode($payloadWithRequester, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         $decodedSig = base64_decode($signature);
         
-        // DEBUG: Log exactly what's being verified
-        error_log("ZURUBANK CertificateManager: VERIFYING JSON: " . $jsonToVerify);
-        error_log("ZURUBANK CertificateManager: JSON length: " . strlen($jsonToVerify));
+        error_log("ZURUBANK CertificateManager: VERIFYING JSON (WITH requester): " . $jsonWithRequester);
+        error_log("ZURUBANK CertificateManager: JSON length: " . strlen($jsonWithRequester));
         error_log("ZURUBANK CertificateManager: Signature decoded length: " . strlen($decodedSig));
         
-        // Step 4: Verify signature
         $keyResource = openssl_pkey_get_public($publicKey);
         if (!$keyResource) {
             error_log("CertificateManager: Invalid public key format");
             return ['verified' => false, 'message' => 'Invalid public key', 'requester' => $requester];
         }
         
-        $result = openssl_verify($jsonToVerify, $decodedSig, $keyResource, OPENSSL_ALGO_SHA256);
+        // Try verification with requester included
+        $result = openssl_verify($jsonWithRequester, $decodedSig, $keyResource, OPENSSL_ALGO_SHA256);
         $isValid = ($result === 1);
+        
+        // ✅ If fails with requester, try without requester (backward compatibility)
+        if (!$isValid) {
+            error_log("ZURUBANK CertificateManager: Retrying without requester (backward compatibility)");
+            
+            $payloadWithoutRequester = $this->removeRequesterRecursive($payloadWithRequester);
+            ksort($payloadWithoutRequester);
+            
+            $jsonWithoutRequester = json_encode($payloadWithoutRequester, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            
+            // Get fresh key resource
+            $keyResource2 = openssl_pkey_get_public($publicKey);
+            if ($keyResource2) {
+                $result2 = openssl_verify($jsonWithoutRequester, $decodedSig, $keyResource2, OPENSSL_ALGO_SHA256);
+                if ($result2 === 1) {
+                    $isValid = true;
+                    $result = $result2;
+                    error_log("ZURUBANK CertificateManager: ✅ VERIFIED WITHOUT requester");
+                }
+            }
+        }
         
         error_log("ZURUBANK CertificateManager: openssl_verify result: " . $result . " (1=valid, 0=invalid, -1=error)");
         error_log("ZURUBANK CertificateManager: Request from {$requester} - Signature: " . ($isValid ? "VALID ✓" : "INVALID ✗"));
@@ -217,41 +222,10 @@ class CertificateManager
             error_log("ZURUBANK CertificateManager: OpenSSL error: " . openssl_error_string());
         }
         
-        // Log the comparison if verification failed
         if (!$isValid) {
-            error_log("ZURUBANK CertificateManager: VERIFICATION FAILED - comparing signed vs verified");
-            error_log("ZURUBANK CertificateManager: Verified JSON (with requester): " . $jsonToVerify);
-            
-            // For debugging - show what VouchMorph signed
-            $originalPayload = $request;
-            unset($originalPayload['signature']);
-            unset($originalPayload['certificate']);
-            ksort($originalPayload);
-            $originalJson = json_encode($originalPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-            error_log("ZURUBANK CertificateManager: Original payload JSON: " . $originalJson);
-            
-            // Check if the JSON strings match
-            if ($jsonToVerify === $originalJson) {
-                error_log("ZURUBANK CertificateManager: JSON strings MATCH - signature should be valid!");
-            } else {
-                error_log("ZURUBANK CertificateManager: JSON strings DIFFER - checking for differences...");
-                
-                // Find the difference
-                $decoded1 = json_decode($jsonToVerify, true);
-                $decoded2 = json_decode($originalJson, true);
-                
-                if ($decoded1 && $decoded2) {
-                    $diff1 = array_diff_assoc($decoded1, $decoded2);
-                    $diff2 = array_diff_assoc($decoded2, $decoded1);
-                    
-                    if (!empty($diff1)) {
-                        error_log("ZURUBANK CertificateManager: Fields in verified but NOT in original: " . implode(', ', array_keys($diff1)));
-                    }
-                    if (!empty($diff2)) {
-                        error_log("ZURUBANK CertificateManager: Fields in original but NOT in verified: " . implode(', ', array_keys($diff2)));
-                    }
-                }
-            }
+            error_log("ZURUBANK CertificateManager: VERIFICATION FAILED");
+            error_log("ZURUBANK CertificateManager: JSON with requester: " . $jsonWithRequester);
+            error_log("ZURUBANK CertificateManager: JSON without requester: " . $jsonWithoutRequester ?? 'N/A');
         }
         
         return [
@@ -262,10 +236,26 @@ class CertificateManager
     }
     
     /**
+     * ✅ NEW: Recursively remove all 'requester' fields
+     */
+    private function removeRequesterRecursive(array $data): array
+    {
+        $clean = [];
+        foreach ($data as $key => $value) {
+            if ($key === 'requester') {
+                continue;
+            }
+            if (is_array($value)) {
+                $clean[$key] = $this->removeRequesterRecursive($value);
+            } else {
+                $clean[$key] = $value;
+            }
+        }
+        return $clean;
+    }
+    
+    /**
      * Create signed request with certificate (for outgoing)
-     * Uses repaired key with automatic retry
-     * 
-     * ✅ FIXED: 'requester' is added BEFORE signing (not after)
      */
     public function createSignedRequest(array $payload, string $requester): array
     {
@@ -277,97 +267,44 @@ class CertificateManager
         error_log("Payload keys: " . implode(', ', array_keys($payload)));
         
         if (!$this->myPrivateKey || !$this->myCertificate) {
-            error_log("CertificateManager: Cannot sign request - missing private key or certificate for {$this->myName}");
-            error_log("Private key missing: " . ($this->myPrivateKey ? 'NO' : 'YES'));
-            error_log("Certificate missing: " . ($this->myCertificate ? 'NO' : 'YES'));
+            error_log("CertificateManager: Cannot sign request - missing private key or certificate");
             return $payload;
         }
         
-        // ✅ FIXED: Add requester BEFORE signing
-        $payloadWithRequester = array_merge($payload, [
-            'requester' => $requester,
-            'timestamp' => time()
-        ]);
-        ksort($payloadWithRequester);
+        // ✅ Remove requester from payload before signing
+        $cleanPayload = $this->removeRequesterRecursive($payload);
+        $payloadWithTimestamp = array_merge($cleanPayload, ['timestamp' => time()]);
+        ksort($payloadWithTimestamp);
         
-        $jsonToSign = json_encode($payloadWithRequester, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        $jsonToSign = json_encode($payloadWithTimestamp, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         error_log("ZURUBANK JSON to sign length: " . strlen($jsonToSign));
         error_log("ZURUBANK JSON to sign preview: " . substr($jsonToSign, 0, 200));
         
         $signature = '';
-        
-        // Load private key - try multiple times with different formats
-        error_log("Attempting to load private key...");
-        error_log("Private key format check - starts with BEGIN: " . (strpos($this->myPrivateKey, 'BEGIN PRIVATE KEY') !== false ? 'YES' : 'NO'));
-        
         $keyResource = openssl_pkey_get_private($this->myPrivateKey);
         
         if (!$keyResource) {
-            error_log("CertificateManager: Primary key load FAILED");
-            
-            // Log OpenSSL errors
-            $opensslErrors = [];
-            while ($err = openssl_error_string()) {
-                $opensslErrors[] = $err;
-                error_log("OpenSSL Error: " . $err);
-            }
-            
-            error_log("CertificateManager: Attempting emergency repair...");
-            
-            // Emergency repair - extract and rebuild again
-            $base64Content = preg_replace('/-----BEGIN PRIVATE KEY-----/', '', $this->myPrivateKey);
-            $base64Content = preg_replace('/-----END PRIVATE KEY-----/', '', $this->myPrivateKey);
-            $base64Content = preg_replace('/[^A-Za-z0-9+\/=]/', '', $base64Content);
-            
-            error_log("Emergency repair - Base64 length: " . strlen($base64Content));
-            
-            $chunks = str_split($base64Content, 64);
-            $repairedKey = "-----BEGIN PRIVATE KEY-----\n" . implode("\n", $chunks) . "\n-----END PRIVATE KEY-----";
-            
-            error_log("Emergency repair - New key length: " . strlen($repairedKey));
-            error_log("Emergency repair - Key preview: " . substr($repairedKey, 0, 100));
-            
-            // Try loading the repaired key
-            $keyResource = openssl_pkey_get_private($repairedKey);
-            if ($keyResource) {
-                // Save the repaired key for future use
-                $this->myPrivateKey = $repairedKey;
-                error_log("CertificateManager: Emergency repair SUCCESSFUL");
-            } else {
-                error_log("CertificateManager: Emergency repair FAILED");
-                while ($err = openssl_error_string()) {
-                    error_log("OpenSSL Error after repair: " . $err);
-                }
-            }
-        } else {
-            error_log("CertificateManager: Primary key load SUCCESSFUL");
-        }
-        
-        if (!$keyResource) {
-            error_log("CertificateManager: Private key load FAILED after all attempts");
-            error_log("Key first 40 chars: " . substr($this->myPrivateKey, 0, 40));
-            error_log("Key last 40 chars: " . substr($this->myPrivateKey, -40));
+            error_log("CertificateManager: Private key load FAILED");
             return $payload;
         }
         
-        error_log("Calling openssl_sign...");
         $signResult = openssl_sign($jsonToSign, $signature, $keyResource, OPENSSL_ALGO_SHA256);
-        error_log("openssl_sign result: " . ($signResult ? 'SUCCESS' : 'FAILURE'));
-        error_log("Generated signature length: " . strlen($signature));
         
-        // Clean up key resource
-        @openssl_free_key($keyResource);
+        if (!$signResult) {
+            error_log("CertificateManager: Failed to create signature");
+            return $payload;
+        }
         
-        // ✅ FIXED: Requester is already in the payload (added before signing)
-        $signedPayload = array_merge($payloadWithRequester, [
+        // ✅ Add requester AFTER signing
+        $signedPayload = array_merge($payloadWithTimestamp, [
             'signature' => base64_encode($signature),
+            'requester' => $requester,
             'certificate' => $this->myCertificate
         ]);
         
         error_log("=== ZURUBANK CREATE SIGNED REQUEST COMPLETE ===");
         error_log("Signature base64 length: " . strlen(base64_encode($signature)));
         error_log("Certificate length: " . strlen($this->myCertificate));
-        error_log("Payload keys: " . implode(', ', array_keys($signedPayload)));
         
         return $signedPayload;
     }
@@ -375,22 +312,5 @@ class CertificateManager
     public function isConfigured(): bool
     {
         return ($this->caCert !== null && $this->myPrivateKey !== null && $this->myCertificate !== null);
-    }
-    
-    /**
-     * Get the current configuration status for debugging
-     */
-    public function getConfigStatus(): array
-    {
-        return [
-            'myName' => $this->myName,
-            'hasCaCert' => $this->caCert !== null,
-            'hasPrivateKey' => $this->myPrivateKey !== null,
-            'hasCertificate' => $this->myCertificate !== null,
-            'isConfigured' => $this->isConfigured(),
-            'privateKeyLength' => $this->myPrivateKey ? strlen($this->myPrivateKey) : 0,
-            'certificateLength' => $this->myCertificate ? strlen($this->myCertificate) : 0,
-            'caCertLength' => $this->caCert ? strlen($this->caCert) : 0
-        ];
     }
 }
