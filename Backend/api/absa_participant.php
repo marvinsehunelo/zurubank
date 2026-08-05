@@ -2,32 +2,19 @@
 declare(strict_types=1);
 
 /**
- * ABSA Participant — full BankAPIInterface implementation.
- *
- * Hosted on Zurubank's infrastructure (technical_host_participant_id
- * -> ZURUBANK in participants.yaml), but ABSA is a fully independent
- * DIRECT participant with its own accounts/ledger — this file never
- * touches Zurubank's own account tables.
- *
- * NATIVE hold model: real hold/debit/release against absa_accounts,
- * unlike MTN's Collection-based simulation. Also reachable via
- * CENTRALSWITCH, per participants.yaml capabilities.
- *
- * Auth: accepts EITHER VouchMorph's API-key scheme OR centralswitch's
- * HMAC scheme, via AuthSchemeRegistry — same dual-auth pattern as
- * mtn_momo_participant.php.
+ * ABSA Participant — standalone HTTP receiver, deployed on Zurubank's
+ * infrastructure as its own file. Deliberately self-contained: does
+ * NOT require any VouchMorph-repo files (src/Infrastructure/...) —
+ * this runs on Zurubank's server, which has no access to VouchMorph's
+ * codebase. Auth verification is inlined here rather than importing
+ * VouchMorph's AuthSchemeRegistry class.
  */
 
 require_once __DIR__ . '/../config/db.php';
-require_once __DIR__ . '/../src/Infrastructure/Auth/AuthSchemeRegistry.php';
-require_once __DIR__ . '/../src/Infrastructure/Banks/Contracts/BankAPIInterface.php';
-
-use Infrastructure\Auth\AuthSchemeRegistry;
-use Infrastructure\Banks\Contracts\BankAPIInterface;
 
 header('Content-Type: application/json');
 
-class AbsaParticipant implements BankAPIInterface
+class AbsaParticipant
 {
     private PDO $db;
 
@@ -66,33 +53,40 @@ class AbsaParticipant implements BankAPIInterface
         };
     }
 
+    /**
+     * Self-contained dual-auth check — no cross-repo class dependency.
+     * Accepts EITHER VouchMorph's API key OR centralswitch's HMAC,
+     * checked inline rather than via VouchMorph's AuthSchemeRegistry
+     * (which doesn't exist in this repo).
+     */
     private function verifyIncomingAuth(string $rawBody, array $headers): bool
     {
-        $registry = new AuthSchemeRegistry();
-        $accepted = [
-            [
-                'scheme' => 'HMAC_SHARED_SECRET',
-                'label' => 'CENTRALSWITCH',
-                'context' => [
-                    'secret' => getenv('ABSA_SWITCH_SECRET') ?: '',
-                    'timestamp_header' => 'x-api-timestamp',
-                    'signature_header' => 'x-api-signature',
-                ],
-            ],
-            [
-                'scheme' => 'API_KEY',
-                'label' => 'VOUCHMORPH',
-                'context' => [
-                    'header_name' => 'x-api-key',
-                    'expected_key' => getenv('ABSA_VOUCHMORPH_API_KEY') ?: '',
-                ],
-            ],
-        ];
-        $result = $registry->verifyAny($headers, $rawBody, $accepted);
-        if ($result['matched']) {
-            error_log("[ABSA] Authenticated as: {$result['label']} via {$result['scheme']}");
+        $headersLower = array_change_key_case($headers, CASE_LOWER);
+
+        // Path 1: VouchMorph API key
+        $providedKey = $headersLower['x-api-key'] ?? null;
+        $expectedKey = getenv('ABSA_VOUCHMORPH_API_KEY') ?: '';
+        if ($providedKey && $expectedKey && hash_equals($expectedKey, $providedKey)) {
+            error_log("[ABSA] Authenticated via VOUCHMORPH API key");
+            return true;
         }
-        return $result['matched'];
+
+        // Path 2: centralswitch HMAC shared secret
+        $timestamp = $headersLower['x-api-timestamp'] ?? null;
+        $signature = $headersLower['x-api-signature'] ?? null;
+        $secret = getenv('ABSA_SWITCH_SECRET') ?: '';
+
+        if ($timestamp && $signature && $secret) {
+            if (abs(time() - (int)$timestamp) <= 300) {
+                $expected = hash_hmac('sha256', $timestamp . $rawBody, $secret);
+                if (hash_equals($expected, $signature)) {
+                    error_log("[ABSA] Authenticated via CENTRALSWITCH HMAC");
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     // ============================================================
@@ -508,34 +502,6 @@ class AbsaParticipant implements BankAPIInterface
         $result = $stmt->fetch(PDO::FETCH_ASSOC);
         return $result ? ['success' => true, 'data' => $result] : ['success' => false, 'message' => 'Reference not found'];
     }
-
-    // ============================================================
-    // Not applicable — explicit refusal
-    // ============================================================
-    private function notSupported(string $method): array
-    {
-        return ['success' => false, 'message' => "{$method} is not supported by ABSA participant simulation"];
-    }
-
-    public function initiateSourceLink(array $params): array { return $this->notSupported('initiateSourceLink'); }
-    public function verifySourceLink(array $params): array { return $this->notSupported('verifySourceLink'); }
-    public function refreshSourceToken(array $params): array { return $this->notSupported('refreshSourceToken'); }
-    public function revokeSourceToken(array $params): array { return $this->notSupported('revokeSourceToken'); }
-    public function useSourceToken(array $params): array { return $this->notSupported('useSourceToken'); }
-    public function getAuthorizationUrl(string $redirectUri, string $state, array $scope = []): string { throw new \RuntimeException('Not supported by ABSA'); }
-    public function exchangeCodeForToken(string $code, string $redirectUri): array { return $this->notSupported('exchangeCodeForToken'); }
-    public function refreshAccessToken(string $refreshToken): array { return $this->notSupported('refreshAccessToken'); }
-    public function revokeToken(string $token, string $tokenType = 'access_token'): bool { return false; }
-    public function getUserInfo(string $accessToken): array { return $this->notSupported('getUserInfo'); }
-    public function getAccountBalance(string $accessToken, string $accountId): array { return $this->getBalanceAction($accountId); }
-    public function getTransactions(string $accessToken, string $accountId, int $limit = 50, int $offset = 0): array { return $this->notSupported('getTransactions'); }
-    public function verifyAssetSigned(array $payload): array { return $this->verifyAsset($payload); }
-    public function placeHoldSigned(array $payload): array { return $this->placeHold($payload); }
-    public function transferWithProof(array $payload): array { return $this->processDeposit($payload); }
-    public function generateTokenWithProof(array $payload): array { return $this->generateToken($payload); }
-    public function processDepositWithProof(array $payload): array { return $this->processDeposit($payload); }
-    public function transfer(array $payload, ?string $type = null): array { return $this->processDeposit($payload); }
-    public function reverse(array $payload): array { return $this->releaseHold($payload); }
 }
 
 // ============================================================
