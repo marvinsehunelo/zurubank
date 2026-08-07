@@ -29,10 +29,16 @@ if (!$apiKey || $apiKey !== $expectedApiKey) {
 }
 
 // ============================================================
-// 2. GET INPUT
+// 2. GET INPUT - FIX: Read BOTH GET params AND JSON POST body
 // ============================================================
 $input = json_decode(file_get_contents('php://input'), true);
-$account_id = $_GET['source_identifier'] ?? $_GET['account_id'] ?? $_GET['account_number'] ?? $_GET['identifier'] ?? null;
+
+// PRIMARY: GET params (for backward compatibility)
+// SECONDARY: JSON POST body (for VoucherMorph requests)
+$account_id = $_GET['source_identifier'] ?? $_GET['account_id'] ?? $_GET['account_number'] ?? $_GET['identifier'] 
+    ?? $input['source_identifier'] ?? $input['account_id'] ?? $input['account_number'] ?? $input['identifier'] 
+    ?? null;
+
 $asset_type = $_GET['asset_type'] ?? $_POST['asset_type'] ?? $input['asset_type'] ?? 'ACCOUNT';
 
 if (!$account_id) {
@@ -304,3 +310,4 @@ try {
         'timestamp' => time()
     ]);
 }
+?>
