@@ -165,7 +165,14 @@ try {
     
     error_log("ZURUBANK HOLD: Action: $action, AssetType: $assetType, HoldRef: $holdReference, Amount: $amount, VoucherNum: $voucherNumber");
 
-    if ($amount <= 0) {
+    // RELEASE_HOLD releases by hold_reference lookup - it doesn't need a
+    // fresh amount supplied by the caller (there's nothing to supply; the
+    // amount being released is whatever was already held). Requiring a
+    // positive amount here made every release fail when the caller
+    // correctly omitted it, leaving holds stuck ACTIVE - see VouchMorph's
+    // rollback path, which never sends 'amount' on a release for exactly
+    // this reason.
+    if ($amount <= 0 && $action !== 'RELEASE_HOLD') {
         throw new Exception("Valid amount required");
     }
 
@@ -480,6 +487,28 @@ try {
                 throw new Exception("No active hold found");
             }
 
+            $fullHeldAmount = floatval($hold['amount']);
+
+            // ============================================================
+            // PARTIAL RELEASE: if the caller supplies a positive amount
+            // strictly less than the full held amount, release only that
+            // much back to available balance. The difference stays
+            // captured - it was already removed from balance when the
+            // hold was placed, and is simply never returned. This is
+            // standard authorization/capture behavior (the same way a
+            // card issuer releases the unused portion of a hotel
+            // pre-auth while keeping the actual charge) - not a special
+            // case invented for this system.
+            //
+            // If $amount is 0/absent, or >= the full held amount, this
+            // behaves exactly as before: release the FULL amount. Every
+            // existing caller that never sends an amount on release is
+            // completely unaffected.
+            // ============================================================
+            $releaseAmount = ($amount > 0 && $amount < $fullHeldAmount) ? $amount : $fullHeldAmount;
+            $isPartial = $releaseAmount < $fullHeldAmount;
+            $capturedAmount = round($fullHeldAmount - $releaseAmount, 2);
+
             $stmt = $pdo->prepare("
                 UPDATE accounts 
                 SET balance = balance + :amount
@@ -487,7 +516,7 @@ try {
                 RETURNING balance
             ");
             $stmt->execute([
-                'amount' => $hold['amount'],
+                'amount' => $releaseAmount,
                 'account_id' => $account['account_id']
             ]);
             $updated = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -498,19 +527,29 @@ try {
 
             $stmt = $pdo->prepare("
                 UPDATE financial_holds 
-                SET status = 'RELEASED', released_at = NOW()
+                SET status = :status,
+                    released_at = NOW(),
+                    debited_at = CASE WHEN :status = 'PARTIALLY_RELEASED' THEN NOW() ELSE debited_at END
                 WHERE id = :hold_id
             ");
-            $stmt->execute(['hold_id' => $hold['id']]);
+            $stmt->execute([
+                'status' => $isPartial ? 'PARTIALLY_RELEASED' : 'RELEASED',
+                'hold_id' => $hold['id']
+            ]);
 
             $responsePayload = [
                 'status' => 'SUCCESS',
                 'hold_placed' => false,
-                'message' => 'Hold released',
+                'message' => $isPartial
+                    ? "Hold partially released: {$releaseAmount} returned to balance, {$capturedAmount} captured"
+                    : 'Hold released',
                 'hold_reference' => $holdReference,
                 'asset_type' => 'ACCOUNT',
                 'asset_id' => $account['account_id'],
-                'amount' => floatval($hold['amount']),
+                'amount' => $releaseAmount,
+                'captured_amount' => $capturedAmount,
+                'full_held_amount' => $fullHeldAmount,
+                'is_partial' => $isPartial,
                 'total_balance' => floatval($updated['balance'])
             ];
             
