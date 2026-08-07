@@ -55,9 +55,26 @@ class AbsaParticipant
     }
 
     /**
-     * Self-contained auth check — now supports certificate-based
-     * authentication (VouchMorph's actual mechanism) plus the two
-     * legacy paths for compatibility.
+     * Self-contained auth check — certificate-based authentication
+     * (VouchMorph's real mechanism) plus two legacy paths.
+     *
+     * ============================================================
+     * CRITICAL FIX (previously a fail-open auth bypass):
+     * verify_requester_signature() returns an ARRAY -
+     * ['valid' => bool, 'message' => string, ...] - in EVERY code path,
+     * whether the signature is valid or not. The previous version of
+     * this method did `if (verify_requester_signature(...))`, checking
+     * the ARRAY ITSELF for truthiness rather than its 'valid' key. In
+     * PHP, any non-empty array is truthy - so ['valid' => false, ...]
+     * evaluated to true here, meaning ANY request with a certificate
+     * and signature field present - valid or garbage - was accepted.
+     * Confirmed live: ZURUBANK's own log showed "Signature verification
+     * from VOUCHMORPH: INVALID" immediately followed by this code
+     * logging "Authenticated via CERTIFICATE" and returning a 200.
+     * Always check $verification['valid'] explicitly - see
+     * authenticate_request() in helpers/crypto.php for the correct
+     * reference pattern this should have matched from the start.
+     * ============================================================
      */
     private function verifyIncomingAuth(array $input, string $rawBody, array $headers): bool
     {
@@ -65,10 +82,14 @@ class AbsaParticipant
 
         // Path 1: Certificate-based auth (VouchMorph's real mechanism)
         if (isset($input['certificate'], $input['signature'])) {
-            if (verify_requester_signature($input, $rawBody)) {
-                error_log("[ABSA] Authenticated via CERTIFICATE (VouchMorph)");
+            $verification = verify_requester_signature($input, $this->db);
+            if ($verification['valid'] ?? false) {
+                error_log("[ABSA] Authenticated via CERTIFICATE (VouchMorph, requester: " . ($verification['requester'] ?? 'unknown') . ")");
                 return true;
             }
+            error_log("[ABSA] Certificate signature INVALID: " . ($verification['message'] ?? 'unknown reason'));
+            // Deliberately fall through to the other paths rather than
+            // returning false immediately here.
         }
 
         // Path 2: VouchMorph API key (legacy)
@@ -333,11 +354,6 @@ class AbsaParticipant
         ];
     }
 
-    /**
-     * generateToken — ATM cashout code, requires an ACTIVE hold to
-     * generate against (matches how ZuruBank's own atm/generate_code.php
-     * conceptually works — code is generated against held funds).
-     */
     public function generateToken(array $payload): array
     {
         $holdReference = $payload['hold_reference'] ?? null;
