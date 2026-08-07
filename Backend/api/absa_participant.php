@@ -11,6 +11,7 @@ declare(strict_types=1);
  */
 
 require_once __DIR__ . '/../config/db.php';
+require_once __DIR__ . '/../helpers/crypto.php';
 
 header('Content-Type: application/json');
 
@@ -32,7 +33,7 @@ class AbsaParticipant
             return $this->handleSwitchWebhook($input, $rawBody, $headers);
         }
 
-        if (!$this->verifyIncomingAuth($rawBody, $headers)) {
+        if (!$this->verifyIncomingAuth($input, $rawBody, $headers)) {
             http_response_code(401);
             return ['success' => false, 'message' => 'Authentication failed'];
         }
@@ -54,16 +55,23 @@ class AbsaParticipant
     }
 
     /**
-     * Self-contained dual-auth check — no cross-repo class dependency.
-     * Accepts EITHER VouchMorph's API key OR centralswitch's HMAC,
-     * checked inline rather than via VouchMorph's AuthSchemeRegistry
-     * (which doesn't exist in this repo).
+     * Self-contained auth check — now supports certificate-based
+     * authentication (VouchMorph's actual mechanism) plus the two
+     * legacy paths for compatibility.
      */
-    private function verifyIncomingAuth(string $rawBody, array $headers): bool
+    private function verifyIncomingAuth(array $input, string $rawBody, array $headers): bool
     {
         $headersLower = array_change_key_case($headers, CASE_LOWER);
 
-        // Path 1: VouchMorph API key
+        // Path 1: Certificate-based auth (VouchMorph's real mechanism)
+        if (isset($input['certificate'], $input['signature'])) {
+            if (verify_requester_signature($input, $rawBody)) {
+                error_log("[ABSA] Authenticated via CERTIFICATE (VouchMorph)");
+                return true;
+            }
+        }
+
+        // Path 2: VouchMorph API key (legacy)
         $providedKey = $headersLower['x-api-key'] ?? null;
         $expectedKey = getenv('ABSA_VOUCHMORPH_API_KEY') ?: '';
         if ($providedKey && $expectedKey && hash_equals($expectedKey, $providedKey)) {
@@ -71,7 +79,7 @@ class AbsaParticipant
             return true;
         }
 
-        // Path 2: centralswitch HMAC shared secret
+        // Path 3: centralswitch HMAC shared secret (legacy)
         $timestamp = $headersLower['x-api-timestamp'] ?? null;
         $signature = $headersLower['x-api-signature'] ?? null;
         $secret = getenv('ABSA_SWITCH_SECRET') ?: '';
@@ -470,7 +478,7 @@ class AbsaParticipant
     // ============================================================
     private function handleSwitchWebhook(array $input, string $rawBody, array $headers): array
     {
-        if (!$this->verifyIncomingAuth($rawBody, $headers)) {
+        if (!$this->verifyIncomingAuth($input, $rawBody, $headers)) {
             http_response_code(401);
             return ['success' => false, 'message' => 'Invalid signature'];
         }
