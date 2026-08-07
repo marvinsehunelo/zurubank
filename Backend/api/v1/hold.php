@@ -525,16 +525,42 @@ try {
                 throw new Exception("Failed to release hold");
             }
 
+            // ============================================================
+            // FIX: Ambiguous-parameter crash on release.
+            //
+            // ROOT CAUSE: :status was bound once but referenced TWICE in
+            // this query - once in the plain SET assignment, and again
+            // inside the CASE...WHEN comparison. PDO/Postgres's type
+            // inference for a repeated named placeholder deduced two
+            // different types across those two occurrences (text vs.
+            // character varying), throwing:
+            //   SQLSTATE[42P08]: Ambiguous parameter: inconsistent types
+            //   deduced for parameter $1 - text versus character varying
+            // This fired on every hold release, so RELEASE_HOLD always
+            // reported ERROR back to the caller even though the actual
+            // balance UPDATE just above had already succeeded - the hold
+            // row itself was never marked RELEASED/PARTIALLY_RELEASED,
+            // leaving it stuck HELD forever in financial_holds.
+            //
+            // FIX: cast every occurrence of :status to the same type
+            // (::varchar) so Postgres never has to infer - purely
+            // additive, the bound value was always a plain string already.
+            //
+            // ALSO FIXED: the execute() array below was missing the
+            // leading ':' on the hold_id key ('hold_id' => ... instead of
+            // ':hold_id' => ...), which does not bind to the :hold_id
+            // placeholder in the query at all.
+            // ============================================================
             $stmt = $pdo->prepare("
                 UPDATE financial_holds 
-                SET status = :status,
+                SET status = :status::varchar,
                     released_at = NOW(),
-                    debited_at = CASE WHEN :status = 'PARTIALLY_RELEASED' THEN NOW() ELSE debited_at END
+                    debited_at = CASE WHEN :status::varchar = 'PARTIALLY_RELEASED' THEN NOW() ELSE debited_at END
                 WHERE id = :hold_id
             ");
             $stmt->execute([
-                'status' => $isPartial ? 'PARTIALLY_RELEASED' : 'RELEASED',
-                'hold_id' => $hold['id']
+                ':status' => $isPartial ? 'PARTIALLY_RELEASED' : 'RELEASED',
+                ':hold_id' => $hold['id']
             ]);
 
             $responsePayload = [
