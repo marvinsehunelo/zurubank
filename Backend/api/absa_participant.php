@@ -508,8 +508,7 @@ class AbsaParticipant
 // ROUTING
 // ============================================================
 try {
-    $pdo = getDB();
-    $participant = new AbsaParticipant($pdo);
+    $participant = new AbsaParticipant($pdo);   // $pdo is already set by require_once __DIR__.'/../config/db.php' at the top of this file
 
     $action = $_GET['action'] ?? '';
     $rawBody = file_get_contents('php://input');
@@ -517,7 +516,7 @@ try {
     $headers = getallheaders() ?: [];
 
     echo json_encode($participant->handleRequest($action, $input, $rawBody, $headers));
-} catch (Exception $e) {
+} catch (\Throwable $e) {
     http_response_code(500);
     echo json_encode(['success' => false, 'message' => $e->getMessage()]);
     error_log("[ABSA] " . $e->getMessage());
