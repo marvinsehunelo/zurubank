@@ -51,47 +51,43 @@ class CertificateManager
     /**
      * Verify a certificate against the trusted CA root
      */
-    public function verifyCertificate(string $certificatePem): bool
-    {
-        if (!$this->caCert) {
-            error_log("CertificateManager: No CA certificate to verify against");
-            return false;
-        }
-        
-        // Write to temp files for openssl
-        $tempCert = tempnam(sys_get_temp_dir(), 'cert_');
-        $tempCA = tempnam(sys_get_temp_dir(), 'ca_');
-        
-        file_put_contents($tempCert, $certificatePem);
-        file_put_contents($tempCA, $this->caCert);
-        
-        // Verify certificate chains to our trusted CA
-        $cmd = "openssl verify -CAfile " . escapeshellarg($tempCA) . " " . escapeshellarg($tempCert) . " 2>&1";
-        exec($cmd, $output, $returnCode);
-        $result = ($returnCode === 0);
-        
-        // Also check certificate is not expired
-        $expiryCmd = "openssl x509 -in " . escapeshellarg($tempCert) . " -noout -enddate 2>&1";
-        exec($expiryCmd, $expiryOutput);
-        foreach ($expiryOutput as $line) {
-            if (preg_match('/notAfter=(.*)/', $line, $matches)) {
-                $expiryDate = strtotime($matches[1]);
-                if ($expiryDate < time()) {
-                    error_log("CertificateManager: Certificate has expired");
-                    $result = false;
-                }
-            }
-        }
-        
-        unlink($tempCert);
-        unlink($tempCA);
-        
-        error_log("CertificateManager: Certificate verification: " . ($result ? "PASSED" : "FAILED"));
-        if (!$result) {
-    error_log("CertificateManager: openssl verify output: " . implode(' | ', $output));   // <-- add this
-}
-return $result;
+   public function verifyCertificate(string $certificatePem): bool
+{
+    if (!$this->caCert) {
+        error_log("CertificateManager: No CA certificate to verify against");
+        return false;
     }
+
+    error_log("CertificateManager: [DIAG] sys_get_temp_dir() = " . sys_get_temp_dir());
+    error_log("CertificateManager: [DIAG] running as uid=" . (function_exists('posix_getuid') ? posix_getuid() : 'unknown'));
+    error_log("CertificateManager: [DIAG] certificatePem length=" . strlen($certificatePem) . ", caCert length=" . strlen($this->caCert));
+
+    $tempCert = tempnam(sys_get_temp_dir(), 'cert_');
+    $tempCA = tempnam(sys_get_temp_dir(), 'ca_');
+
+    error_log("CertificateManager: [DIAG] tempCert=" . var_export($tempCert, true) . ", tempCA=" . var_export($tempCA, true));
+
+    $wroteCert = file_put_contents($tempCert, $certificatePem);
+    $wroteCA = file_put_contents($tempCA, $this->caCert);
+
+    error_log("CertificateManager: [DIAG] wroteCert bytes=" . var_export($wroteCert, true) . ", wroteCA bytes=" . var_export($wroteCA, true));
+    error_log("CertificateManager: [DIAG] file_exists(tempCert)=" . (file_exists($tempCert) ? 'YES' : 'NO') . ", file_exists(tempCA)=" . (file_exists($tempCA) ? 'YES' : 'NO'));
+
+    $cmd = "openssl verify -CAfile " . escapeshellarg($tempCA) . " " . escapeshellarg($tempCert) . " 2>&1";
+    error_log("CertificateManager: [DIAG] cmd=" . $cmd);
+
+    exec($cmd, $output, $returnCode);
+
+    error_log("CertificateManager: [DIAG] returnCode=" . $returnCode . ", output=" . implode(' | ', $output));
+
+    $result = ($returnCode === 0);
+
+    unlink($tempCert);
+    unlink($tempCA);
+
+    error_log("CertificateManager: Certificate verification: " . ($result ? "PASSED" : "FAILED"));
+    return $result;
+}
     
     /**
      * Extract public key from a certificate
