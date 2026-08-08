@@ -87,7 +87,10 @@ class CertificateManager
         unlink($tempCA);
         
         error_log("CertificateManager: Certificate verification: " . ($result ? "PASSED" : "FAILED"));
-        return $result;
+        if (!$result) {
+    error_log("CertificateManager: openssl verify output: " . implode(' | ', $output));   // <-- add this
+}
+return $result;
     }
     
     /**
