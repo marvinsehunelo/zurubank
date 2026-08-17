@@ -12,26 +12,63 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit();
 }
 
+require_once __DIR__ . '/../../../helpers/crypto.php';
+
 // ============================================================
 // 1. AUTHENTICATION
+//
+// FIX: previously only ever checked a plaintext API key. Now also
+// accepts certificate-based auth (verify_requester_signature(), the
+// same real mechanism this bank's own hold.php/crypto.php already
+// use elsewhere) when the incoming request carries a signed body —
+// this is what VouchMorph's GenericBankClient now sends for getBalance
+// specifically when this institution is configured as MUTUAL_TLS in
+// endpoints.yaml. The plaintext key path is left intact for any other
+// caller not yet using certificate auth.
 // ============================================================
-$apiKey = $_SERVER['HTTP_X_API_KEY'] ?? $_GET['api_key'] ?? null;
-$expectedApiKey = getenv('ZURUBANK_API_KEY') ?: 'zurubank_live_3uV4wX5yZ6aB7cD8';
+$rawBody = file_get_contents('php://input');
+$decodedBody = json_decode($rawBody, true);
 
-if (!$apiKey || $apiKey !== $expectedApiKey) {
+$authenticated = false;
+$authMethod = null;
+
+if (is_array($decodedBody) && isset($decodedBody['certificate'], $decodedBody['signature'])) {
+    $verification = verify_requester_signature($decodedBody, $pdo ?? null);
+    if ($verification['valid'] ?? false) {
+        $authenticated = true;
+        $authMethod = 'CERTIFICATE (requester: ' . ($verification['requester'] ?? 'unknown') . ')';
+        error_log("[ZURUBANK Balance] Authenticated via certificate signature");
+    } else {
+        error_log("[ZURUBANK Balance] Certificate signature present but INVALID: " . ($verification['message'] ?? 'unknown reason'));
+    }
+}
+
+if (!$authenticated) {
+    $apiKey = $_SERVER['HTTP_X_API_KEY'] ?? $_GET['api_key'] ?? null;
+    $expectedApiKey = getenv('ZURUBANK_API_KEY') ?: 'zurubank_live_3uV4wX5yZ6aB7cD8';
+
+    if ($apiKey && $apiKey === $expectedApiKey) {
+        $authenticated = true;
+        $authMethod = 'API_KEY';
+    }
+}
+
+if (!$authenticated) {
     http_response_code(401);
     echo json_encode([
         'status' => 'error',
-        'message' => 'Invalid API key',
+        'message' => 'Invalid API key or certificate signature',
         'timestamp' => time()
     ]);
     exit();
 }
 
+error_log("[ZURUBANK Balance] Authenticated via: {$authMethod}");
+
 // ============================================================
-// 2. GET INPUT - FIX: Read BOTH GET params AND JSON POST body
+// 2. GET INPUT - reads BOTH GET params AND JSON POST body
 // ============================================================
-$input = json_decode(file_get_contents('php://input'), true);
+$input = $decodedBody;
 $account_id = $_GET['source_identifier'] ?? $_GET['account_id'] ?? $_GET['account_number'] ?? $_GET['identifier']
     ?? $input['source_identifier'] ?? $input['account_id'] ?? $input['account_number'] ?? $input['identifier'] ?? null;
 $asset_type = $_GET['asset_type'] ?? $_POST['asset_type'] ?? $input['asset_type'] ?? 'ACCOUNT';
@@ -52,32 +89,31 @@ if (!$account_id) {
 try {
     $databaseUrl = getenv('DATABASE_URL');
     if (!$databaseUrl) {
-        // Try Railway's alternative env var
         $databaseUrl = getenv('RAILWAY_DATABASE_URL');
     }
-    
+
     if (!$databaseUrl) {
         throw new Exception('DATABASE_URL environment variable not set');
     }
-    
+
     $parsed = parse_url($databaseUrl);
     if (!$parsed || !isset($parsed['host'])) {
         throw new Exception('Invalid DATABASE_URL format');
     }
-    
+
     $dsn = sprintf(
         "pgsql:host=%s;port=%s;dbname=%s;sslmode=require",
         $parsed['host'],
         $parsed['port'] ?? 5432,
         ltrim($parsed['path'] ?? '', '/')
     );
-    
+
     $pdo = new PDO($dsn, $parsed['user'] ?? 'postgres', $parsed['pass'] ?? '', [
         PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
         PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
         PDO::ATTR_TIMEOUT => 10
     ]);
-    
+
     error_log("[ZURUBANK Balance] Database connected successfully");
 
 } catch (Exception $e) {
@@ -112,16 +148,15 @@ try {
     // CHECK VOUCHER TABLE FIRST
     // ============================================================
     if ($asset_type === 'VOUCHER' || $asset_type === 'CASHOUT-VOUCHER' || strpos($account_id, 'VOUCHER_') === 0) {
-        
+
         $voucherIdentifier = $account_id;
         if (strpos($voucherIdentifier, 'VOUCHER_') === 0) {
             $voucherIdentifier = substr($voucherIdentifier, 8);
         }
-        
-        // Check if voucher table exists
+
         try {
             $voucherStmt = $pdo->prepare("
-                SELECT 
+                SELECT
                     voucher_id,
                     voucher_number,
                     voucher_pin,
@@ -147,8 +182,8 @@ try {
                     external_reference,
                     source_hold_reference,
                     code_hash
-                FROM instant_money_vouchers 
-                WHERE 
+                FROM instant_money_vouchers
+                WHERE
                     (voucher_number = :identifier OR voucher_id = :identifier)
                     AND status NOT IN ('redeemed', 'expired')
                     AND voucher_expires_at > NOW()
@@ -159,7 +194,7 @@ try {
                 'identifier' => $voucherIdentifier
             ]);
             $voucher = $voucherStmt->fetch(PDO::FETCH_ASSOC);
-            
+
             if ($voucher) {
                 $balance = (float)$voucher['amount'];
                 $currency = $voucher['currency'] ?? 'BWP';
@@ -186,7 +221,6 @@ try {
                 error_log("[ZURUBANK Balance] Found voucher: {$account_id}, amount: {$balance}");
             }
         } catch (PDOException $e) {
-            // Voucher table might not exist - just continue to accounts
             error_log("[ZURUBANK Balance] Voucher table check: " . $e->getMessage());
         }
     }
@@ -196,7 +230,7 @@ try {
     // ============================================================
     if ($balance === null && !$isVoucher) {
         $stmt = $pdo->prepare("
-            SELECT 
+            SELECT
                 account_id,
                 user_id,
                 account_number,
@@ -278,10 +312,9 @@ try {
         ],
         'requester' => 'ZURUBANK',
         'verification_method' => 'database',
-        'signature_verified' => true
+        'signature_verified' => ($authMethod !== 'API_KEY')
     ];
-    
-    // Add voucher details if applicable
+
     if ($voucherData) {
         $responseData['data']['voucher_details'] = $voucherData;
     }
