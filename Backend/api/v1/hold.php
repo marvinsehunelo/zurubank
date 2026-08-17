@@ -2,7 +2,7 @@
 /**
  * backend/api/v1/hold.php
  * Unified hold endpoint for Zurubank
- * Handles VOUCHER, ACCOUNT, and WALLET holds
+ * Handles VOUCHER, ACCOUNT, WALLET, and CARD holds
  */
 
 require_once __DIR__ . '/../../config/db.php';
@@ -155,6 +155,47 @@ try {
             throw new Exception("Could not determine asset type");
         }
     }
+
+    // ============================================================
+    // CARD RESOLUTION — mirrors verify_asset.php's approach exactly.
+    // financial_holds has NO asset_type or card_id column at all —
+    // holds are distinguished purely by which of account_id/
+    // wallet_id is populated (see the CREATE TABLE below in the
+    // ACCOUNT branch). A card resolves to its linked account and is
+    // then handled by the existing ACCOUNT branch — for PLACE_HOLD,
+    // RELEASE, and DEBIT alike — with zero further changes needed.
+    // This also means notify_debit.php needs NO changes at all: it
+    // finds holds purely by hold_reference + status='HELD', with no
+    // asset_type awareness whatsoever.
+    // ============================================================
+    if ($assetType === 'CARD') {
+        $cardNumber = $accountNumber ?? $input['card_number'] ?? null;
+
+        if (empty($cardNumber)) {
+            throw new Exception("card_number (or source_identifier) required for CARD hold");
+        }
+
+        $cardStmt = $pdo->prepare("
+            SELECT c.card_id, c.status AS card_status, a.account_number
+            FROM cards c
+            JOIN accounts a ON a.account_id = c.account_id
+            WHERE c.card_number = :card_number
+            LIMIT 1
+        ");
+        $cardStmt->execute(['card_number' => $cardNumber]);
+        $cardRow = $cardStmt->fetch(PDO::FETCH_ASSOC);
+
+        if (!$cardRow) {
+            throw new Exception("Card not found: " . substr($cardNumber, -4));
+        }
+        if ($cardRow['card_status'] !== 'ACTIVE') {
+            throw new Exception("Card is not active (status: {$cardRow['card_status']})");
+        }
+
+        error_log("ZURUBANK HOLD: CARD resolved to account_number={$cardRow['account_number']}, card_id={$cardRow['card_id']}");
+        $accountNumber = $cardRow['account_number'];
+        $assetType = 'ACCOUNT';
+    }
     
     $amount = floatval($input['amount'] ?? $input['value'] ?? 0);
     $holdReference = $input['reference'] ?? $input['hold_reference'] ?? null;
@@ -304,7 +345,7 @@ try {
         }
 
     // ============================================================
-    // ACCOUNT HANDLING
+    // ACCOUNT HANDLING (also handles resolved CARD requests)
     // ============================================================
     } elseif ($assetType === 'ACCOUNT') {
         if (!$accountNumber) {
@@ -731,3 +772,4 @@ try {
         ]
     ]);
 }
+?>
