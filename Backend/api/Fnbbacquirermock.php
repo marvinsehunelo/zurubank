@@ -2,44 +2,30 @@
 declare(strict_types=1);
 
 /**
- * FNBB Card Acquirer — MOCK, deployed on Zurubank's infrastructure as a
- * stand-in for FNBB's real acquiring sandbox while access is pending.
+ * FNBB Card Acquirer -- MOCK shared logic class.
+ * Deployed on Zurubank's infrastructure as a stand-in for FNBB's real
+ * acquiring sandbox while access is pending.
  *
- * Field shapes here are NOT invented from Visa/Mastercard's public docs —
- * they are taken directly from src/Infrastructure/Banks/CardAcquirerBankClient.php,
- * the actual client code that will call this endpoint. That means swapping
- * this mock's base_url + auth for FNBB's real endpoint later should require
- * ONLY a config change (endpoints.yaml base_url + auth.secret_source),
- * PROVIDED FNBB's real API happens to use the same field names. If it
- * doesn't, CardAcquirerBankClient itself will need updating regardless of
- * what this mock does — this mock cannot guarantee that part.
- *
- * Actions this mock implements, matching CardAcquirerBankClient exactly:
- *   verify_asset  -> action=PRE_AUTH_CHECK  (only when pre_auth_check: true)
- *   place_hold    -> action=AUTHORIZE
- *   debit_funds   -> action=CAPTURE
- *   release_hold  -> action=VOID
- *   process_deposit -> action=CARD_LOAD   (only when destination_enabled: true)
- *
- * Auth: certificate-based, reusing Zurubank's existing crypto.php
- * (verify_requester_signature) — the same real mechanism ZURUBANK's own
- * balance.php and absa_participant.php use, since CardAcquirerBankClient
- * signs every payload via createSignedPayload() before sending.
- *
- * Test PANs recognized (industry-standard, same numbers Visa/Mastercard's
- * own public sandboxes use, so behavior here should transfer conceptually):
- *   4111111111111111  Visa      -> always approved
- *   4000000000000002  Visa      -> always declined (insufficient funds)
- *   5555555555554444  Mastercard -> always approved
- *   5105105105105100  Mastercard -> always declined (insufficient funds)
- *   Any other 16-digit PAN -> approved with balance 100000 BWP (permissive
- *   default, so ad-hoc test tokens don't need pre-registration)
+ * Field shapes are taken directly from
+ * src/Infrastructure/Banks/CardAcquirerBankClient.php -- the real
+ * client code that calls this. Endpoint PATHS (preauth.php,
+ * authorize.php, capture.php, void.php) intentionally mirror real
+ * card-acquirer API conventions (Visa/Mastercard-style: preauth ->
+ * authorize -> capture -> void) rather than a single file with
+ * ?action= query params, so that swapping to FNBB's real endpoint
+ * later is a small, predictable diff:
+ *   1. base_url -> https://api.fnbbotswana.co.bw/acquiring/v1
+ *   2. drop the .php suffix from each endpoint path
+ *   3. auth.type / secret_source -> whatever FNBB's real API requires
+ * The .php suffix exists only because this mock's host may be a PHP
+ * dev server (php -S), which -- confirmed with CAZACOM earlier this
+ * session -- cannot do .htaccess-based extension-less rewriting. If
+ * ZURUBANK's real host supports clean routing, drop the suffix --
+ * no other change needed.
  */
 
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../helpers/crypto.php';
-
-header('Content-Type: application/json');
 
 class FnbbAcquirerMock
 {
@@ -58,30 +44,26 @@ class FnbbAcquirerMock
         $this->ensureTables();
     }
 
-    public function handleRequest(string $action, array $input, string $rawBody, array $headers): array
+    public function run(array $input, string $rawBody, array $headers, string $action): void
     {
         if (!$this->verifyIncomingAuth($input, $rawBody, $headers)) {
             http_response_code(401);
-            return ['success' => false, 'message' => 'Authentication failed'];
+            echo json_encode(['success' => false, 'message' => 'Authentication failed']);
+            return;
         }
 
-        return match ($action) {
-            'verify_asset' => $this->preAuthCheck($input),
-            'place_hold' => $this->authorize($input),
-            'debit_funds' => $this->capture($input),
-            'release_hold' => $this->void($input),
-            'process_deposit' => $this->cardLoad($input),
+        $result = match ($action) {
+            'preauth' => $this->preAuthCheck($input),
+            'authorize' => $this->authorize($input),
+            'capture' => $this->capture($input),
+            'void' => $this->void($input),
+            'card_load' => $this->cardLoad($input),
             default => ['success' => false, 'message' => "Unknown action: {$action}"],
         };
+
+        echo json_encode($result);
     }
 
-    /**
-     * Certificate-based auth only — matches CardAcquirerBankClient, which
-     * always signs via createSignedPayload() before sending. No legacy
-     * API-key fallback here, since every real call from this client is
-     * already signed; a missing signature means something upstream is
-     * misconfigured, not a legitimate legacy caller.
-     */
     private function verifyIncomingAuth(array $input, string $rawBody, array $headers): bool
     {
         if (isset($input['certificate'], $input['signature'])) {
@@ -95,11 +77,7 @@ class FnbbAcquirerMock
         return false;
     }
 
-    // ============================================================
-    // PRE_AUTH_CHECK — only reached when card_acquirer.pre_auth_check
-    // is true; CardAcquirerBankClient short-circuits this locally
-    // otherwise (see its verifyAssetSigned()).
-    // ============================================================
+    // /preauth -> CardAcquirerBankClient::verifyAssetSigned()
     private function preAuthCheck(array $payload): array
     {
         $pan = $this->extractPan($payload);
@@ -119,12 +97,7 @@ class FnbbAcquirerMock
         ];
     }
 
-    // ============================================================
-    // AUTHORIZE — CardAcquirerBankClient::placeHold()
-    // Expects response fields: authorization_reference (or
-    // auth_reference/hold_reference) + authorization_code (or
-    // auth_code), success flag.
-    // ============================================================
+    // /authorize -> CardAcquirerBankClient::placeHold()
     private function authorize(array $payload): array
     {
         $pan = $this->extractPan($payload);
@@ -140,7 +113,7 @@ class FnbbAcquirerMock
         if (!$card['active']) {
             return [
                 'success' => false,
-                'message' => 'Card declined — issuer refused authorization',
+                'message' => 'Card declined -- issuer refused authorization',
                 'data' => ['decline_code' => 'DO_NOT_HONOR'],
             ];
         }
@@ -148,7 +121,7 @@ class FnbbAcquirerMock
         if ($card['balance'] < $amount) {
             return [
                 'success' => false,
-                'message' => 'Card declined — insufficient funds',
+                'message' => 'Card declined -- insufficient funds',
                 'data' => ['decline_code' => 'INSUFFICIENT_FUNDS'],
             ];
         }
@@ -164,8 +137,6 @@ class FnbbAcquirerMock
         ");
         $stmt->execute([$authRef, $authCode, substr($pan, -4), $amount, $payload['currency'] ?? 'BWP', $expiresAt]);
 
-        // Hold the amount against the synthetic test balance so repeated
-        // authorizations against the same PAN behave consistently.
         $this->db->prepare("UPDATE fnbb_mock_cards SET held_balance = held_balance + ? WHERE pan = ?")
             ->execute([$amount, $pan]);
 
@@ -181,10 +152,7 @@ class FnbbAcquirerMock
         ];
     }
 
-    // ============================================================
-    // CAPTURE — CardAcquirerBankClient::debitFunds()
-    // Expects: transaction_reference (or capture_reference), status.
-    // ============================================================
+    // /capture -> CardAcquirerBankClient::debitFunds()
     private function capture(array $payload): array
     {
         $authRef = $payload['authorization_reference'] ?? null;
@@ -236,9 +204,7 @@ class FnbbAcquirerMock
         ];
     }
 
-    // ============================================================
-    // VOID — CardAcquirerBankClient::releaseHold()
-    // ============================================================
+    // /void -> CardAcquirerBankClient::releaseHold()
     private function void(array $payload): array
     {
         $authRef = $payload['authorization_reference'] ?? null;
@@ -270,10 +236,7 @@ class FnbbAcquirerMock
         return ['success' => true, 'message' => 'Authorization voided', 'data' => ['status' => 'VOIDED']];
     }
 
-    // ============================================================
-    // CARD_LOAD (destination) — CardAcquirerBankClient::processDepositWithProof()
-    // Only reached if destination_enabled: true in participants.yaml.
-    // ============================================================
+    // card_load -> CardAcquirerBankClient::processDepositWithProof()
     private function cardLoad(array $payload): array
     {
         $pan = $payload['destination_card_token'] ?? null;
@@ -317,9 +280,6 @@ class FnbbAcquirerMock
         ];
     }
 
-    // ============================================================
-    // HELPERS
-    // ============================================================
     private function extractPan(array $payload): ?string
     {
         return $payload['card_token'] ?? $payload['source_identifier'] ?? null;
@@ -396,22 +356,4 @@ class FnbbAcquirerMock
             )
         ");
     }
-}
-
-// ============================================================
-// ROUTING
-// ============================================================
-try {
-    $mock = new FnbbAcquirerMock($pdo);
-
-    $action = $_GET['action'] ?? '';
-    $rawBody = file_get_contents('php://input');
-    $input = $_SERVER['REQUEST_METHOD'] === 'POST' ? (json_decode($rawBody, true) ?? []) : $_GET;
-    $headers = getallheaders() ?: [];
-
-    echo json_encode($mock->handleRequest($action, $input, $rawBody, $headers));
-} catch (\Throwable $e) {
-    http_response_code(500);
-    echo json_encode(['success' => false, 'message' => $e->getMessage()]);
-    error_log("[FNBB_MOCK] " . $e->getMessage());
 }
