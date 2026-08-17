@@ -2,6 +2,7 @@
 /**
  * /Backend/api/v1/verify_asset_zurubank.php
  * FIXED: Handles destination_asset_type, account_identifier, and VERIFY_ACCOUNT action
+ * UPDATED: Added CARD support (resolves to account)
  */
 
 require_once __DIR__ . '/../../config/db.php';
@@ -118,15 +119,18 @@ if (($assetType === 'VOUCHER' || $assetType === 'CASHOUT-VOUCHER') && empty($vou
 
 error_log("Normalized - Type: $assetType, Voucher: $voucherNumber, Account: $accountNumber, Phone: $claimantPhone, Amount: $amount");
 
-if ($assetType !== 'VOUCHER' && $assetType !== 'CASHOUT-VOUCHER' && $assetType !== 'ACCOUNT') {
+// ============================================================
+// EDIT 1: Widen the allowed-asset-type check to include CARD
+// ============================================================
+if ($assetType !== 'VOUCHER' && $assetType !== 'CASHOUT-VOUCHER' && $assetType !== 'ACCOUNT' && $assetType !== 'CARD') {
     error_log("ERROR: Unsupported asset type for ZURUBANK: $assetType");
     echo json_encode([
         "success" => true,
         "verified" => false,
-        "message" => "ZURUBANK only supports VOUCHER, CASHOUT-VOUCHER, or ACCOUNT asset type",
+        "message" => "ZURUBANK only supports VOUCHER, CASHOUT-VOUCHER, ACCOUNT, or CARD asset type",
         "debug" => [
             "received_type" => $assetType,
-            "supported_types" => ["VOUCHER", "CASHOUT-VOUCHER", "ACCOUNT"]
+            "supported_types" => ["VOUCHER", "CASHOUT-VOUCHER", "ACCOUNT", "CARD"]
         ]
     ]);
     exit;
@@ -135,6 +139,62 @@ if ($assetType !== 'VOUCHER' && $assetType !== 'CASHOUT-VOUCHER' && $assetType !
 try {
     if (!isset($pdo)) {
         throw new Exception("Database connection failed to initialize.");
+    }
+
+    // ============================================================
+    // EDIT 2: CARD RESOLUTION — ZURUBANK's schema has no card-specific
+    // concept downstream (neither `accounts` nor `financial_holds`
+    // — see hold.php — has any card_id/asset_type distinction). A
+    // card is purely a credential that resolves to an
+    // account_number; once resolved, the existing ACCOUNT
+    // verification logic below applies completely unchanged.
+    //
+    // This is a deliberate simplification specific to ZURUBANK's
+    // actual schema — SACCUSSALIS's separate cards +
+    // financial_holds.asset_type design lets it label responses
+    // "CARD" distinctly. ZURUBANK's genuinely does not track that
+    // distinction anywhere, so once resolved this reports
+    // asset_type "ACCOUNT" in the response, same as every other
+    // account access path on this bank already does.
+    // ============================================================
+    if ($assetType === 'CARD') {
+        $cardNumber = $accountNumber ?? $input['card_number'] ?? null;
+
+        if (empty($cardNumber)) {
+            echo json_encode([
+                "success" => true,
+                "verified" => false,
+                "message" => "card_number (or source_identifier) required for CARD verification"
+            ]);
+            exit;
+        }
+
+        $cardStmt = $pdo->prepare("
+            SELECT c.card_id, c.status AS card_status, a.account_number
+            FROM cards c
+            JOIN accounts a ON a.account_id = c.account_id
+            WHERE c.card_number = :card_number
+            LIMIT 1
+        ");
+        $cardStmt->execute(['card_number' => $cardNumber]);
+        $cardRow = $cardStmt->fetch(PDO::FETCH_ASSOC);
+
+        if (!$cardRow) {
+            echo json_encode(["success" => true, "verified" => false, "message" => "Card not found"]);
+            exit;
+        }
+        if ($cardRow['card_status'] !== 'ACTIVE') {
+            echo json_encode([
+                "success" => true,
+                "verified" => false,
+                "message" => "Card is not active (status: {$cardRow['card_status']})"
+            ]);
+            exit;
+        }
+
+        error_log("verify_asset: CARD resolved to account_number={$cardRow['account_number']}, card_id={$cardRow['card_id']}");
+        $accountNumber = $cardRow['account_number'];
+        $assetType = 'ACCOUNT';
     }
 
     if ($assetType === 'ACCOUNT') {
@@ -417,3 +477,4 @@ try {
         ]
     ]);
 }
+?>
