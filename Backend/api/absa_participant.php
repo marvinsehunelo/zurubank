@@ -94,7 +94,7 @@ class AbsaParticipant
 
         // Path 2: VouchMorph API key (legacy)
         $providedKey = $headersLower['x-api-key'] ?? null;
-        $expectedKey = getenv('ABSA_VOUCHMORPH_API_KEY') ?: '';
+        $expectedKey = getenv('ZURUBANK_API_KEY') ?: '';
         if ($providedKey && $expectedKey && hash_equals($expectedKey, $providedKey)) {
             error_log("[ABSA] Authenticated via VOUCHMORPH API key");
             return true;
