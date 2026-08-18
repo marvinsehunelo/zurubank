@@ -158,7 +158,11 @@ class AbsaParticipant
         $holdReference = 'ABSAHOLD_' . ($payload['reference'] ?? uniqid());
 
         if (!$accountNumber || $amount <= 0) {
-            return ['hold_placed' => false, 'message' => 'source_identifier and amount required'];
+            return [
+                'success' => false,
+                'hold_placed' => false,
+                'message' => 'source_identifier and amount required'
+            ];
         }
 
         $this->db->beginTransaction();
@@ -169,13 +173,21 @@ class AbsaParticipant
 
             if (!$account) {
                 $this->db->rollBack();
-                return ['hold_placed' => false, 'message' => 'Account not found'];
+                return [
+                    'success' => false,
+                    'hold_placed' => false,
+                    'message' => 'Account not found'
+                ];
             }
 
             $available = (float)$account['balance'] - (float)$account['held_balance'];
             if ($available < $amount) {
                 $this->db->rollBack();
-                return ['hold_placed' => false, 'message' => 'Insufficient available balance'];
+                return [
+                    'success' => false,
+                    'hold_placed' => false,
+                    'message' => 'Insufficient available balance'
+                ];
             }
 
             $this->db->prepare("UPDATE absa_accounts SET held_balance = held_balance + ? WHERE account_number = ?")
@@ -191,6 +203,12 @@ class AbsaParticipant
             $this->db->commit();
 
             return [
+                // FIX: was missing this key — same gap found and fixed
+                // in CAZACOM's hold.php/credit.php this session, and
+                // the confirmed cause of the "Hold failed: Hold placed
+                // successfully" contradiction. Whatever wraps this call
+                // reads $result['success'] as the pass/fail signal.
+                'success' => true,
                 'hold_placed' => true,
                 'hold_reference' => $holdReference,
                 'status' => 'ACTIVE',
@@ -199,7 +217,11 @@ class AbsaParticipant
             ];
         } catch (Exception $e) {
             $this->db->rollBack();
-            return ['hold_placed' => false, 'message' => 'Hold failed: ' . $e->getMessage()];
+            return [
+                'success' => false,
+                'hold_placed' => false,
+                'message' => 'Hold failed: ' . $e->getMessage()
+            ];
         }
     }
 
