@@ -38,6 +38,12 @@ class FnbbAcquirerMock
 
     private const DEFAULT_TEST_LIMIT = 100000.00;
 
+    // FIX: Enhanced decline codes for better diagnostics
+    private const DECLINE_REASONS = [
+        '4000000000000002' => 'DO_NOT_HONOR',
+        '5105105105105100' => 'DO_NOT_HONOR',
+    ];
+
     public function __construct(PDO $db)
     {
         $this->db = $db;
@@ -82,17 +88,63 @@ class FnbbAcquirerMock
     {
         $pan = $this->extractPan($payload);
         if (!$pan) {
-            return ['success' => false, 'verified' => false, 'message' => 'card token/PAN required', 'data' => []];
+            return [
+                'success' => false,
+                'verified' => false,
+                'message' => 'card token/PAN required',
+                'data' => [
+                    'error_code' => 'MISSING_PAN',
+                    'provided_fields' => array_keys($payload),
+                ]
+            ];
+        }
+
+        // Validate PAN format (basic Luhn check)
+        if (!$this->isValidPan($pan)) {
+            return [
+                'success' => false,
+                'verified' => false,
+                'message' => 'Invalid PAN format',
+                'data' => [
+                    'error_code' => 'INVALID_PAN_FORMAT',
+                    'pan_length' => strlen($pan),
+                    'pan_last4' => substr($pan, -4),
+                ]
+            ];
         }
 
         $card = $this->lookupOrRegisterCard($pan);
 
+        // FIX: Enhanced response with detailed diagnostic information
+        if (!$card['active']) {
+            $declineCode = self::DECLINE_REASONS[$pan] ?? 'DO_NOT_HONOR';
+            return [
+                'success' => false,
+                'verified' => false,
+                'message' => 'Card declined',
+                'data' => [
+                    'message' => 'Card declined -- issuer refused authorization',
+                    'verified' => false,
+                    'decline_code' => $declineCode,
+                    'pan_last4' => substr($pan, -4),
+                    'card_active' => $card['active'],
+                    'card_balance' => $card['balance'],
+                    'card_exists' => $card['exists'] ?? true,
+                    'test_card' => in_array($pan, self::DECLINED_PANS, true),
+                    'error_code' => $declineCode,
+                ],
+            ];
+        }
+
         return [
-            'success' => $card['active'],
-            'verified' => $card['active'],
+            'success' => true,
+            'verified' => true,
             'data' => [
-                'message' => $card['active'] ? 'Card active and passed pre-auth check' : 'Card declined',
-                'verified' => $card['active'],
+                'message' => 'Card active and passed pre-auth check',
+                'verified' => true,
+                'pan_last4' => substr($pan, -4),
+                'card_balance' => $card['balance'],
+                'card_active' => $card['active'],
             ],
         ];
     }
@@ -105,16 +157,44 @@ class FnbbAcquirerMock
         $reference = $payload['reference'] ?? ('AUTH_' . uniqid());
 
         if (!$pan || $amount <= 0) {
-            return ['success' => false, 'message' => 'card token/PAN and amount required', 'data' => []];
+            return [
+                'success' => false,
+                'message' => 'card token/PAN and amount required',
+                'data' => [
+                    'error_code' => 'MISSING_REQUIRED_FIELDS',
+                    'has_pan' => !empty($pan),
+                    'has_amount' => $amount > 0,
+                    'provided_fields' => array_keys($payload),
+                ]
+            ];
+        }
+
+        // Validate PAN format
+        if (!$this->isValidPan($pan)) {
+            return [
+                'success' => false,
+                'message' => 'Invalid PAN format',
+                'data' => [
+                    'error_code' => 'INVALID_PAN_FORMAT',
+                    'pan_length' => strlen($pan),
+                    'pan_last4' => substr($pan, -4),
+                ]
+            ];
         }
 
         $card = $this->lookupOrRegisterCard($pan);
 
         if (!$card['active']) {
+            $declineCode = self::DECLINE_REASONS[$pan] ?? 'DO_NOT_HONOR';
             return [
                 'success' => false,
                 'message' => 'Card declined -- issuer refused authorization',
-                'data' => ['decline_code' => 'DO_NOT_HONOR'],
+                'data' => [
+                    'decline_code' => $declineCode,
+                    'pan_last4' => substr($pan, -4),
+                    'card_active' => $card['active'],
+                    'error_code' => $declineCode,
+                ],
             ];
         }
 
@@ -122,7 +202,13 @@ class FnbbAcquirerMock
             return [
                 'success' => false,
                 'message' => 'Card declined -- insufficient funds',
-                'data' => ['decline_code' => 'INSUFFICIENT_FUNDS'],
+                'data' => [
+                    'decline_code' => 'INSUFFICIENT_FUNDS',
+                    'pan_last4' => substr($pan, -4),
+                    'available_balance' => $card['balance'],
+                    'requested_amount' => $amount,
+                    'error_code' => 'INSUFFICIENT_FUNDS',
+                ],
             ];
         }
 
@@ -148,6 +234,9 @@ class FnbbAcquirerMock
                 'authorization_code' => $authCode,
                 'status' => 'ACTIVE',
                 'expires_at' => $expiresAt,
+                'pan_last4' => substr($pan, -4),
+                'amount' => $amount,
+                'currency' => $payload['currency'] ?? 'BWP',
             ],
         ];
     }
@@ -159,7 +248,14 @@ class FnbbAcquirerMock
         $amount = (float)($payload['amount'] ?? 0);
 
         if (!$authRef) {
-            return ['success' => false, 'message' => 'authorization_reference required', 'data' => []];
+            return [
+                'success' => false,
+                'message' => 'authorization_reference required',
+                'data' => [
+                    'error_code' => 'MISSING_AUTH_REF',
+                    'provided_fields' => array_keys($payload),
+                ]
+            ];
         }
 
         $stmt = $this->db->prepare("SELECT * FROM fnbb_mock_authorizations WHERE authorization_reference = ? AND status = 'ACTIVE'");
@@ -167,12 +263,27 @@ class FnbbAcquirerMock
         $auth = $stmt->fetch(PDO::FETCH_ASSOC);
 
         if (!$auth) {
-            return ['success' => false, 'message' => 'Authorization not found or not active', 'data' => []];
+            return [
+                'success' => false,
+                'message' => 'Authorization not found or not active',
+                'data' => [
+                    'error_code' => 'AUTH_NOT_FOUND',
+                    'authorization_reference' => $authRef,
+                ]
+            ];
         }
 
         if (strtotime($auth['expires_at']) < time()) {
             $this->db->prepare("UPDATE fnbb_mock_authorizations SET status = 'EXPIRED' WHERE authorization_reference = ?")->execute([$authRef]);
-            return ['success' => false, 'message' => 'Authorization expired', 'data' => []];
+            return [
+                'success' => false,
+                'message' => 'Authorization expired',
+                'data' => [
+                    'error_code' => 'AUTH_EXPIRED',
+                    'authorization_reference' => $authRef,
+                    'expires_at' => $auth['expires_at'],
+                ]
+            ];
         }
 
         $captureAmount = $amount > 0 ? $amount : (float)$auth['amount'];
@@ -191,7 +302,15 @@ class FnbbAcquirerMock
             $this->db->commit();
         } catch (Exception $e) {
             $this->db->rollBack();
-            return ['success' => false, 'message' => 'Capture failed: ' . $e->getMessage(), 'data' => []];
+            return [
+                'success' => false,
+                'message' => 'Capture failed: ' . $e->getMessage(),
+                'data' => [
+                    'error_code' => 'CAPTURE_FAILED',
+                    'authorization_reference' => $authRef,
+                    'error_details' => $e->getMessage(),
+                ]
+            ];
         }
 
         return [
@@ -200,6 +319,9 @@ class FnbbAcquirerMock
             'data' => [
                 'transaction_reference' => $txRef,
                 'status' => 'COMPLETED',
+                'authorization_reference' => $authRef,
+                'amount' => $captureAmount,
+                'currency' => $payload['currency'] ?? 'BWP',
             ],
         ];
     }
@@ -209,7 +331,14 @@ class FnbbAcquirerMock
     {
         $authRef = $payload['authorization_reference'] ?? null;
         if (!$authRef) {
-            return ['success' => false, 'message' => 'authorization_reference required', 'data' => []];
+            return [
+                'success' => false,
+                'message' => 'authorization_reference required',
+                'data' => [
+                    'error_code' => 'MISSING_AUTH_REF',
+                    'provided_fields' => array_keys($payload),
+                ]
+            ];
         }
 
         $stmt = $this->db->prepare("SELECT * FROM fnbb_mock_authorizations WHERE authorization_reference = ?");
@@ -217,11 +346,25 @@ class FnbbAcquirerMock
         $auth = $stmt->fetch(PDO::FETCH_ASSOC);
 
         if (!$auth) {
-            return ['success' => false, 'message' => 'Authorization not found', 'data' => []];
+            return [
+                'success' => false,
+                'message' => 'Authorization not found',
+                'data' => [
+                    'error_code' => 'AUTH_NOT_FOUND',
+                    'authorization_reference' => $authRef,
+                ]
+            ];
         }
 
         if ($auth['status'] !== 'ACTIVE') {
-            return ['success' => true, 'message' => "Authorization already {$auth['status']}, nothing to void", 'data' => ['status' => $auth['status']]];
+            return [
+                'success' => true,
+                'message' => "Authorization already {$auth['status']}, nothing to void",
+                'data' => [
+                    'status' => $auth['status'],
+                    'authorization_reference' => $authRef,
+                ]
+            ];
         }
 
         $this->db->prepare("UPDATE fnbb_mock_authorizations SET status = 'VOIDED' WHERE authorization_reference = ?")->execute([$authRef]);
@@ -233,7 +376,16 @@ class FnbbAcquirerMock
                 ->execute([$auth['amount'], $card['pan']]);
         }
 
-        return ['success' => true, 'message' => 'Authorization voided', 'data' => ['status' => 'VOIDED']];
+        return [
+            'success' => true,
+            'message' => 'Authorization voided',
+            'data' => [
+                'status' => 'VOIDED',
+                'authorization_reference' => $authRef,
+                'pan_last4' => $auth['pan_last4'],
+                'amount' => (float)$auth['amount'],
+            ]
+        ];
     }
 
     // card_load -> CardAcquirerBankClient::processDepositWithProof()
@@ -243,10 +395,45 @@ class FnbbAcquirerMock
         $amount = (float)($payload['amount'] ?? 0);
 
         if (!$pan || $amount <= 0) {
-            return ['success' => false, 'message' => 'destination_card_token and amount required', 'data' => []];
+            return [
+                'success' => false,
+                'message' => 'destination_card_token and amount required',
+                'data' => [
+                    'error_code' => 'MISSING_REQUIRED_FIELDS',
+                    'has_pan' => !empty($pan),
+                    'has_amount' => $amount > 0,
+                    'provided_fields' => array_keys($payload),
+                ]
+            ];
+        }
+
+        // Validate PAN format
+        if (!$this->isValidPan($pan)) {
+            return [
+                'success' => false,
+                'message' => 'Invalid PAN format',
+                'data' => [
+                    'error_code' => 'INVALID_PAN_FORMAT',
+                    'pan_length' => strlen($pan),
+                    'pan_last4' => substr($pan, -4),
+                ]
+            ];
         }
 
         $card = $this->lookupOrRegisterCard($pan);
+
+        if (!$card['active']) {
+            return [
+                'success' => false,
+                'message' => 'Card is not active',
+                'data' => [
+                    'error_code' => 'CARD_INACTIVE',
+                    'pan_last4' => substr($pan, -4),
+                    'card_active' => $card['active'],
+                ]
+            ];
+        }
+
         $txRef = 'FNBBLOAD_' . uniqid();
 
         $this->db->beginTransaction();
@@ -262,7 +449,15 @@ class FnbbAcquirerMock
             $this->db->commit();
         } catch (Exception $e) {
             $this->db->rollBack();
-            return ['success' => false, 'message' => 'Card load failed: ' . $e->getMessage(), 'data' => []];
+            return [
+                'success' => false,
+                'message' => 'Card load failed: ' . $e->getMessage(),
+                'data' => [
+                    'error_code' => 'LOAD_FAILED',
+                    'pan_last4' => substr($pan, -4),
+                    'error_details' => $e->getMessage(),
+                ]
+            ];
         }
 
         $stmt = $this->db->prepare("SELECT balance FROM fnbb_mock_cards WHERE pan = ?");
@@ -276,6 +471,9 @@ class FnbbAcquirerMock
                 'transaction_reference' => $txRef,
                 'status' => 'COMPLETED',
                 'new_balance' => $newBalance,
+                'pan_last4' => substr($pan, -4),
+                'amount' => $amount,
+                'currency' => $payload['currency'] ?? 'BWP',
             ],
         ];
     }
@@ -283,6 +481,34 @@ class FnbbAcquirerMock
     private function extractPan(array $payload): ?string
     {
         return $payload['card_token'] ?? $payload['source_identifier'] ?? null;
+    }
+
+    /**
+     * FIX: Added basic Luhn algorithm validation for PAN
+     * This helps distinguish between "invalid card number" and "declined card"
+     */
+    private function isValidPan(string $pan): bool
+    {
+        // Basic format: 16-19 digits
+        if (!preg_match('/^\d{16,19}$/', $pan)) {
+            return false;
+        }
+
+        // Luhn algorithm check
+        $sum = 0;
+        $alt = false;
+        for ($i = strlen($pan) - 1; $i >= 0; $i--) {
+            $n = (int)$pan[$i];
+            if ($alt) {
+                $n *= 2;
+                if ($n > 9) {
+                    $n -= 9;
+                }
+            }
+            $sum += $n;
+            $alt = !$alt;
+        }
+        return ($sum % 10) === 0;
     }
 
     private function lookupOrRegisterCard(string $pan): array
@@ -295,18 +521,39 @@ class FnbbAcquirerMock
             $active = !in_array($pan, self::DECLINED_PANS, true);
             $balance = $active ? self::DEFAULT_TEST_LIMIT : 0;
 
+            // FIX: Validate PAN before registering
+            $isValidPan = $this->isValidPan($pan);
+            if (!$isValidPan) {
+                // Don't register invalid PANs
+                return [
+                    'pan' => $pan,
+                    'active' => false,
+                    'balance' => 0,
+                    'exists' => false,
+                    'valid_format' => false,
+                ];
+            }
+
             $this->db->prepare("
                 INSERT INTO fnbb_mock_cards (pan, pan_last4, active, balance, held_balance)
                 VALUES (?, ?, ?, ?, 0)
             ")->execute([$pan, substr($pan, -4), $active ? 1 : 0, $balance]);
 
-            return ['pan' => $pan, 'active' => $active, 'balance' => $balance];
+            return [
+                'pan' => $pan,
+                'active' => $active,
+                'balance' => $balance,
+                'exists' => false,
+                'valid_format' => true,
+            ];
         }
 
         return [
             'pan' => $card['pan'],
             'active' => (bool)$card['active'],
             'balance' => (float)$card['balance'] - (float)$card['held_balance'],
+            'exists' => true,
+            'valid_format' => true,
         ];
     }
 
