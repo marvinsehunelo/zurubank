@@ -12,19 +12,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit();
 }
 
+// ============================================================
+// FIX: this endpoint used to authenticate BEFORE the database
+// connection existed (section 3, below) was ever created. It called
+// verify_requester_signature($decodedBody, $pdo ?? null) with $pdo
+// undefined at that point in the file, so it was always passed null.
+// It also used a DIFFERENT verification function/canonicalization
+// path than hold.php and generate_code.php (both of which use
+// CertificateManager::verifySignedRequest() successfully, confirmed
+// "Signature: VALID" in production logs), which is the same shaky
+// verify_requester_signature() helper already found to fail open in
+// absa_participant.php. Symptom in production: every balance check
+// against a signed request failed with "Certificate signature
+// present but INVALID: Invalid signature" and a 401, even though the
+// certificate chain itself verified fine.
+//
+// Fix: use the same CertificateManager class as the rest of this
+// bank's endpoints, so all three endpoints verify signatures
+// identically and none of them depend on a database connection that
+// doesn't exist yet.
+// ============================================================
+require_once __DIR__ . '/../../../helpers/CertificateManager.php';
 require_once __DIR__ . '/../../../helpers/crypto.php';
 
 // ============================================================
 // 1. AUTHENTICATION
-//
-// FIX: previously only ever checked a plaintext API key. Now also
-// accepts certificate-based auth (verify_requester_signature(), the
-// same real mechanism this bank's own hold.php/crypto.php already
-// use elsewhere) when the incoming request carries a signed body —
-// this is what VouchMorph's GenericBankClient now sends for getBalance
-// specifically when this institution is configured as MUTUAL_TLS in
-// endpoints.yaml. The plaintext key path is left intact for any other
-// caller not yet using certificate auth.
 // ============================================================
 $rawBody = file_get_contents('php://input');
 $decodedBody = json_decode($rawBody, true);
@@ -33,13 +45,18 @@ $authenticated = false;
 $authMethod = null;
 
 if (is_array($decodedBody) && isset($decodedBody['certificate'], $decodedBody['signature'])) {
-    $verification = verify_requester_signature($decodedBody, $pdo ?? null);
-    if ($verification['valid'] ?? false) {
-        $authenticated = true;
-        $authMethod = 'CERTIFICATE (requester: ' . ($verification['requester'] ?? 'unknown') . ')';
-        error_log("[ZURUBANK Balance] Authenticated via certificate signature");
+    $certManager = new CertificateManager('ZURUBANK');
+    if ($certManager->isConfigured()) {
+        $verification = $certManager->verifySignedRequest($decodedBody);
+        if ($verification['verified'] ?? false) {
+            $authenticated = true;
+            $authMethod = 'CERTIFICATE (requester: ' . ($verification['requester'] ?? 'unknown') . ')';
+            error_log("[ZURUBANK Balance] Authenticated via certificate signature");
+        } else {
+            error_log("[ZURUBANK Balance] Certificate signature present but INVALID: " . ($verification['message'] ?? 'unknown reason'));
+        }
     } else {
-        error_log("[ZURUBANK Balance] Certificate signature present but INVALID: " . ($verification['message'] ?? 'unknown reason'));
+        error_log("[ZURUBANK Balance] CertificateManager not configured (missing CA cert / private key / certificate env vars) — cannot verify certificate auth");
     }
 }
 
@@ -338,4 +355,3 @@ try {
         'timestamp' => time()
     ]);
 }
-?>
