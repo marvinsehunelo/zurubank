@@ -246,12 +246,12 @@ function verify_requester_signature($input, $pdo)
     }
     
     // Build payload for verification
-    $payloadToVerify = [];
-    foreach ($input as $key => $value) {
-        if (!in_array($key, ['signature', 'certificate'])) {
-            $payloadToVerify[$key] = $value;
-        }
+   $payloadToVerify = [];
+foreach ($input as $key => $value) {
+    if (!in_array($key, ['signature', 'certificate', 'requester'], true)) {
+        $payloadToVerify[$key] = $value;
     }
+}
     
     ksort($payloadToVerify);
     $jsonToVerify = json_encode($payloadToVerify, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
