@@ -202,19 +202,38 @@ class AbsaParticipant
 
             $this->db->commit();
 
-            return [
-                // FIX: was missing this key — same gap found and fixed
-                // in CAZACOM's hold.php/credit.php this session, and
-                // the confirmed cause of the "Hold failed: Hold placed
-                // successfully" contradiction. Whatever wraps this call
-                // reads $result['success'] as the pass/fail signal.
-                'success' => true,
-                'hold_placed' => true,
-                'hold_reference' => $holdReference,
-                'status' => 'ACTIVE',
-                'message' => 'Hold placed successfully',
-                'data' => [],
-            ];
+          $responseBody = [
+    'success' => true,
+    'hold_placed' => true,
+    'hold_reference' => $holdReference,
+    'status' => 'ACTIVE',
+    'message' => 'Hold placed successfully',
+    'data' => [],
+];
+
+// FIX: sign the response using ZURUBANK's own certificate/key via
+// crypto.php's sign_payload() — this file is hosted on ZURUBANK's
+// infrastructure and that function is already available (already
+// require_once'd at the top of this file), just never called here.
+// Same gap and same fix pattern as CAZACOM's and MTN's hold.php
+// earlier tonight — AggregateSigner requires a valid certificate +
+// signature from every multi-source contributor, and this was the
+// only one still missing it.
+$signed = sign_payload($responseBody);
+if ($signed) {
+    $certContent = getenv('ZURUBANK_CERT_CONTENT');
+    if ($certContent) {
+        $certContent = str_replace(['\\n', '\n'], "\n", $certContent);
+    }
+    return array_merge($responseBody, [
+        'signature' => $signed['signature'],
+        'timestamp' => $signed['timestamp'],
+        'certificate' => $certContent,
+    ]);
+}
+
+error_log("[ABSA] placeHold: sign_payload() failed - returning UNSIGNED response. Multi-source pools including ABSA will fail signature verification.");
+return $responseBody;
         } catch (Exception $e) {
             $this->db->rollBack();
             return [
