@@ -50,6 +50,8 @@ class AbsaParticipant
             'confirm_cashout' => $this->confirmCashout($input),
             'check_status' => $this->checkStatus($input['reference'] ?? ''),
             'account_balance' => $this->getBalanceAction($input['account_number'] ?? ''),
+            'create_reservation_account' => $this->createReservationAccount($input),
+            'reservation_account_status' => $this->reservationAccountStatus($input),
             default => ['success' => false, 'message' => "Unknown action: {$action}"],
         };
     }
@@ -498,6 +500,124 @@ return $responseBody;
             $this->db->rollBack();
             return ['success' => false, 'confirmed' => false, 'message' => 'Confirmation failed: ' . $e->getMessage()];
         }
+    }
+
+    // ============================================================
+    // RESERVATION ACCOUNTS — real, dedicated account opened for a
+    // VouchMorph beneficiary who hasn't linked a bank account yet
+    // (replaces the old shared pooled-account fallback).
+    // ============================================================
+
+    public function createReservationAccount(array $payload): array
+    {
+        $bankReference = $payload['bank_reference'] ?? $payload['reference'] ?? null;
+        $reference = $payload['reference'] ?? $bankReference;
+        $currency = $payload['currency'] ?? 'BWP';
+
+        if (!$bankReference) {
+            return ['success' => false, 'message' => 'bank_reference required'];
+        }
+
+        $this->db->exec("
+            CREATE TABLE IF NOT EXISTS absa_reservation_accounts (
+                id SERIAL PRIMARY KEY,
+                bank_reference VARCHAR(150) UNIQUE NOT NULL,
+                reference VARCHAR(150),
+                account_number VARCHAR(255),
+                currency VARCHAR(10) DEFAULT 'BWP',
+                status VARCHAR(30) DEFAULT 'active',
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        ");
+
+        // ============================================================
+        // IDEMPOTENCY: VouchMorph retries with the SAME bank_reference
+        // after a timeout or ambiguous response — look it up first and
+        // return the existing account rather than creating a second one.
+        // ============================================================
+        $stmt = $this->db->prepare("SELECT * FROM absa_reservation_accounts WHERE bank_reference = ?");
+        $stmt->execute([$bankReference]);
+        $existing = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if ($existing) {
+            return [
+                'success' => true,
+                'status' => $existing['status'],
+                'account_identifier' => $existing['account_number'],
+                'account_identifier_type' => 'account_number',
+                'message' => 'Reservation account already exists for this bank_reference',
+            ];
+        }
+
+        $this->db->beginTransaction();
+        try {
+            do {
+                $accountNumber = 'ABSA' . str_pad((string)random_int(0, 999999999), 9, '0', STR_PAD_LEFT);
+                $checkStmt = $this->db->prepare("SELECT 1 FROM absa_accounts WHERE account_number = ?");
+                $checkStmt->execute([$accountNumber]);
+            } while ($checkStmt->fetchColumn());
+
+            $this->db->prepare("
+                INSERT INTO absa_accounts (account_number, account_name, balance, currency)
+                VALUES (?, ?, 0, ?)
+            ")->execute([$accountNumber, 'VouchMorph Reservation ' . $bankReference, $currency]);
+
+            $this->db->prepare("
+                INSERT INTO absa_reservation_accounts (bank_reference, reference, account_number, currency, status)
+                VALUES (?, ?, ?, ?, 'active')
+            ")->execute([$bankReference, $reference, $accountNumber, $currency]);
+
+            $this->db->commit();
+
+            return [
+                'success' => true,
+                'status' => 'active',
+                'account_identifier' => $accountNumber,
+                'account_identifier_type' => 'account_number',
+                'message' => 'Reservation account created',
+            ];
+        } catch (Exception $e) {
+            $this->db->rollBack();
+            return ['success' => false, 'message' => 'Reservation account creation failed: ' . $e->getMessage()];
+        }
+    }
+
+    public function reservationAccountStatus(array $payload): array
+    {
+        $bankReference = $payload['bank_reference'] ?? null;
+        if (!$bankReference) {
+            return ['success' => false, 'message' => 'bank_reference required'];
+        }
+
+        $this->db->exec("
+            CREATE TABLE IF NOT EXISTS absa_reservation_accounts (
+                id SERIAL PRIMARY KEY,
+                bank_reference VARCHAR(150) UNIQUE NOT NULL,
+                reference VARCHAR(150),
+                account_number VARCHAR(255),
+                currency VARCHAR(10) DEFAULT 'BWP',
+                status VARCHAR(30) DEFAULT 'active',
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        ");
+
+        $stmt = $this->db->prepare("SELECT * FROM absa_reservation_accounts WHERE bank_reference = ?");
+        $stmt->execute([$bankReference]);
+        $reservation = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if (!$reservation) {
+            return ['success' => false, 'message' => "Reservation account not found for bank_reference: {$bankReference}"];
+        }
+
+        return [
+            'success' => true,
+            'status' => $reservation['status'],
+            'account_identifier' => $reservation['account_number'],
+            'account_identifier_type' => 'account_number',
+            'message' => 'Reservation account status retrieved',
+        ];
     }
 
     private function getBalanceAction(string $accountNumber): array
