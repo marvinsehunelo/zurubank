@@ -146,6 +146,43 @@ try {
         throw new Exception("Currency mismatch. Account: {$account['currency']}, Requested: {$currency}");
     }
 
+    // ============================================================
+    // IDENTITY-SWAP RECEIVING/HOLDING SWEEP
+    //
+    // ZURUBANK is the destination of an identity swap when VouchMorph
+    // sends destination_identifier (used for a beneficiary claimed by
+    // phone/email/national ID/account, not the plain destination_account
+    // /account_number a normal deposit uses - see the
+    // PROCESS_DEPOSIT_WITH_PROOF compensation payload this was fixed
+    // for). Sweep the proceeds through IDENTITY-RECEIVING then
+    // IDENTITY-HOLDING before the final payout below credits the real
+    // account, same as VOUCHER-SUSPENSE tracks voucher proceeds.
+    // These are internal suspense accounts (swap_internal_accounts,
+    // seeded by database/migrations/2026_09_16_identity_swap_internal_accounts.sql)
+    // - each leg nets the account back to zero once the funds move on,
+    // so this only records the flow, it never blocks on their balance.
+    // ============================================================
+    $isIdentitySwapDeposit = isset($input['destination_identifier']);
+
+    if ($isIdentitySwapDeposit) {
+        $sweepStmt = $pdo->prepare("
+            UPDATE swap_internal_accounts SET balance = balance + :amount WHERE account_code = :code
+        ");
+        $sweepDownStmt = $pdo->prepare("
+            UPDATE swap_internal_accounts SET balance = balance - :amount WHERE account_code = :code
+        ");
+
+        // Leg 1: proceeds land in IDENTITY-RECEIVING
+        $sweepStmt->execute(['amount' => $amount, 'code' => 'IDENTITY-RECEIVING']);
+        // Leg 2: swept from IDENTITY-RECEIVING to IDENTITY-HOLDING
+        $sweepDownStmt->execute(['amount' => $amount, 'code' => 'IDENTITY-RECEIVING']);
+        $sweepStmt->execute(['amount' => $amount, 'code' => 'IDENTITY-HOLDING']);
+        // Leg 3: final payout from IDENTITY-HOLDING to the real account below
+        $sweepDownStmt->execute(['amount' => $amount, 'code' => 'IDENTITY-HOLDING']);
+
+        error_log("ZURUBANK DEPOSIT: Identity-swap sweep recorded (RECEIVING -> HOLDING -> account) for {$destinationAccount}, amount {$amount}");
+    }
+
     // Record old balance for audit
     $oldBalance = (float)$account['balance'];
     $newBalance = $oldBalance + $amount;

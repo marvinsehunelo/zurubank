@@ -169,6 +169,40 @@ try {
             'sig_verified' => $isValid ? 1 : 0
         ]);
 
+        // ============================================================
+        // IDENTITY-SWAP SETTLEMENT LEG
+        //
+        // ZURUBANK is the source of an identity swap here - VouchMorph
+        // marks this with reason "Identity claim finalization" (the only
+        // signal this endpoint currently receives for it; there's no
+        // explicit swap_type field on this payload the way verify_asset
+        // and hold get one). Record the debited amount passing through
+        // IDENTITY-SETTLEMENT on its way to the counterparty bank. This
+        // is a suspense account (swap_internal_accounts, seeded by
+        // database/migrations/2026_09_16_identity_swap_internal_accounts.sql)
+        // - both legs together net it back to zero, so it only records
+        // the flow rather than holding funds. The customer's own balance
+        // was already debited at hold-placement time (see the comment
+        // above); this does not touch it again.
+        // ============================================================
+        $isIdentitySwapDebit = stripos((string)($input['reason'] ?? ''), 'identity') !== false;
+
+        if ($isIdentitySwapDebit) {
+            $settlementStmt = $pdo->prepare("
+                UPDATE swap_internal_accounts SET balance = balance + :amount WHERE account_code = :code
+            ");
+            $settlementDownStmt = $pdo->prepare("
+                UPDATE swap_internal_accounts SET balance = balance - :amount WHERE account_code = :code
+            ");
+
+            // Leg 1: debited customer funds move into IDENTITY-SETTLEMENT
+            $settlementStmt->execute(['amount' => $amount, 'code' => 'IDENTITY-SETTLEMENT']);
+            // Leg 2: settled out to the counterparty bank
+            $settlementDownStmt->execute(['amount' => $amount, 'code' => 'IDENTITY-SETTLEMENT']);
+
+            error_log("ZURUBANK NOTIFY_DEBIT: Identity-swap settlement leg recorded for hold_reference={$holdReference}, amount={$amount}, counterparty={$counterpartyBank}");
+        }
+
         // Record in audit
         $ipAddress = $_SERVER['REMOTE_ADDR'] ?? $_SERVER['HTTP_X_FORWARDED_FOR'] ?? null;
         $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? null;
