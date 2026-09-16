@@ -57,7 +57,7 @@ error_log("ZURUBANK DEPOSIT: Request verified from {$requester} using certificat
 $reference = $input['reference'] ?? $input['depositRef'] ?? uniqid('DEP-');
 $sourceInstitution = $input['source_institution'] ?? $input['from_bank'] ?? 'UNKNOWN';
 $sourceHoldReference = $input['source_hold_reference'] ?? null;
-$destinationAccount = $input['destination_account'] ?? $input['account_number'] ?? null;
+$destinationAccount = $input['destination_account'] ?? $input['destination_identifier'] ?? $input['account_number'] ?? null;
 $amount = (float)($input['amount'] ?? 0);
 $action = $input['action'] ?? 'PROCESS_DEPOSIT';
 $currency = $input['currency'] ?? 'BWP';
