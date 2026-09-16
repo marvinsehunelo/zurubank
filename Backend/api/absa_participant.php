@@ -277,6 +277,24 @@ return $responseBody;
             $this->db->prepare("UPDATE absa_holds SET status = 'DEBITED', debited_at = NOW() WHERE hold_reference = ?")
                 ->execute([$holdReference]);
 
+            // ============================================================
+            // IDENTITY-SWAP SETTLEMENT LEG — ABSA is the source of an
+            // identity swap here. ABSA keeps its own ledger separate from
+            // ZURUBANK's (absa_accounts, not accounts/swap_internal_accounts),
+            // so it gets its own settlement suspense account rather than
+            // sharing ZURUBANK's IDENTITY-SETTLEMENT. Both legs net this
+            // back to zero — it only records the flow, same reasoning as
+            // ZURUBANK's notify_debit.php.
+            // ============================================================
+            if (stripos((string)($payload['reason'] ?? ''), 'identity') !== false) {
+                $this->getOrCreateInternalAccount('ABSA-IDENTITY-SETTLEMENT', 'ABSA Identity Settlement Suspense');
+                $this->db->prepare("UPDATE absa_accounts SET balance = balance + ? WHERE account_number = ?")
+                    ->execute([$hold['amount'], 'ABSA-IDENTITY-SETTLEMENT']);
+                $this->db->prepare("UPDATE absa_accounts SET balance = balance - ? WHERE account_number = ?")
+                    ->execute([$hold['amount'], 'ABSA-IDENTITY-SETTLEMENT']);
+                error_log("[ABSA] Identity-swap settlement leg recorded for hold_reference={$holdReference}, amount={$hold['amount']}");
+            }
+
             $txnRef = 'ABSADEBIT_' . uniqid();
             $this->db->prepare("
                 INSERT INTO absa_transfers (transaction_reference, account_number, amount, currency, direction, status)
@@ -358,6 +376,32 @@ return $responseBody;
         $this->db->beginTransaction();
         try {
             $this->getOrCreateAccount($accountNumber);
+
+            // ============================================================
+            // IDENTITY-SWAP RECEIVING/HOLDING SWEEP — ABSA is the
+            // destination of an identity swap when the caller sends
+            // destination_identifier specifically (not the plain
+            // account_number a normal deposit uses). Sweep through
+            // ABSA's own receiving/holding suspense accounts before the
+            // final credit below, kept separate from ZURUBANK's
+            // IDENTITY-RECEIVING/HOLDING for the same reason as the
+            // settlement leg in debitFunds().
+            // ============================================================
+            if (isset($payload['destination_identifier'])) {
+                $this->getOrCreateInternalAccount('ABSA-IDENTITY-RECEIVING', 'ABSA Identity Receiving Suspense');
+                $this->getOrCreateInternalAccount('ABSA-IDENTITY-HOLDING', 'ABSA Identity Holding Suspense');
+
+                $this->db->prepare("UPDATE absa_accounts SET balance = balance + ? WHERE account_number = ?")
+                    ->execute([$amount, 'ABSA-IDENTITY-RECEIVING']);
+                $this->db->prepare("UPDATE absa_accounts SET balance = balance - ? WHERE account_number = ?")
+                    ->execute([$amount, 'ABSA-IDENTITY-RECEIVING']);
+                $this->db->prepare("UPDATE absa_accounts SET balance = balance + ? WHERE account_number = ?")
+                    ->execute([$amount, 'ABSA-IDENTITY-HOLDING']);
+                $this->db->prepare("UPDATE absa_accounts SET balance = balance - ? WHERE account_number = ?")
+                    ->execute([$amount, 'ABSA-IDENTITY-HOLDING']);
+
+                error_log("[ABSA] Identity-swap sweep recorded (RECEIVING -> HOLDING -> account) for {$accountNumber}, amount {$amount}");
+            }
 
             $this->db->prepare("UPDATE absa_accounts SET balance = balance + ? WHERE account_number = ?")
                 ->execute([$amount, $accountNumber]);
@@ -642,6 +686,32 @@ return $responseBody;
                 INSERT INTO absa_accounts (account_number, account_name, balance, currency)
                 VALUES (?, ?, 1000000, 'BWP')
             ")->execute([$accountNumber, 'ABSA Customer ' . $accountNumber]);
+
+            $stmt->execute([$accountNumber]);
+            $account = $stmt->fetch(PDO::FETCH_ASSOC);
+        }
+
+        return $account;
+    }
+
+    /**
+     * Same lazy-provisioning as getOrCreateAccount(), but seeded at
+     * balance 0 rather than 1,000,000 - for internal suspense accounts
+     * (identity-swap receiving/holding/settlement) that are meant to
+     * only ever record a pass-through flow, never hold simulated
+     * customer funds.
+     */
+    private function getOrCreateInternalAccount(string $accountNumber, string $accountName): array
+    {
+        $stmt = $this->db->prepare("SELECT * FROM absa_accounts WHERE account_number = ?");
+        $stmt->execute([$accountNumber]);
+        $account = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if (!$account) {
+            $this->db->prepare("
+                INSERT INTO absa_accounts (account_number, account_name, balance, currency)
+                VALUES (?, ?, 0, 'BWP')
+            ")->execute([$accountNumber, $accountName]);
 
             $stmt->execute([$accountNumber]);
             $account = $stmt->fetch(PDO::FETCH_ASSOC);
