@@ -597,3 +597,13 @@ CREATE TABLE oauth_refresh_tokens (
     revoked BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- ============================================================
+-- Identity-swap internal accounts (see database/migrations/2026_09_16_identity_swap_internal_accounts.sql)
+-- ============================================================
+INSERT INTO swap_internal_accounts (account_code, purpose, currency, status)
+VALUES
+    ('IDENTITY-RECEIVING', 'identity_swap_receiving', 'BWP', 'active'),
+    ('IDENTITY-HOLDING', 'identity_swap_holding', 'BWP', 'active'),
+    ('IDENTITY-SETTLEMENT', 'identity_swap_settlement', 'BWP', 'active')
+ON CONFLICT (account_code) DO NOTHING;
