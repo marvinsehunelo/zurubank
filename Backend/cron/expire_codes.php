@@ -83,6 +83,8 @@ try {
 
         foreach ($rows as $v) {
             try {
+                // Each item is independent: a failure rolls back only this item.
+                $pdo->exec('SAVEPOINT expiry_item');
                 // Already redeemed between the SELECT and now? Leave it.
                 $recheck = $pdo->prepare("
                     SELECT status, redeemed_at FROM instant_money_vouchers
@@ -129,8 +131,10 @@ try {
                         }
                     }
                 }
+                $pdo->exec('RELEASE SAVEPOINT expiry_item');
 
             } catch (Throwable $e) {
+                try { $pdo->exec('ROLLBACK TO SAVEPOINT expiry_item'); } catch (Throwable $ignore) {}
                 $failed++;
                 error_log('[' . JOB . '] FAILED voucher ' . ($v['voucher_number'] ?? '?')
                     . ': ' . $e->getMessage());
@@ -139,7 +143,7 @@ try {
 
         $pdo->commit();
 
-        if (count($rows) < BATCH_SIZE) {
+        if (count($rows) < BATCH_SIZE || $failed >= BATCH_SIZE) {
             break;
         }
     }
