@@ -12,6 +12,7 @@
 header('Content-Type: application/json');
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/central_bank_notice.php';
+require_once __DIR__ . '/settlement_stores.php';
 
 [$raw, $n] = cbn_read_verified();
 $role = $n['role'] === 'recipient' ? 'recipient' : 'sender';
@@ -27,6 +28,11 @@ try {
         if ($status !== 'approved') { $pdo->commit(); cbn_reply(200, 'success', 'Nothing to credit'); }
         if ($amount <= 0) throw new DomainException('Invalid amount');
         $accountNo = (string)($n['recipient_account_number'] ?? '');
+        // VouchMorph settlement money lands in the bank's own clearing or
+        // VouchMorph's fee account; create either the first time it is needed.
+        if (SettlementDesk::isInternal($accountNo)) {
+            zurubank_settlement_store($pdo)['ensure_account']($accountNo, 'VouchMorph settlement');
+        }
         $stmt = $pdo->prepare("SELECT account_id, user_id, status FROM accounts WHERE account_number = ? LIMIT 1 FOR UPDATE");
         $stmt->execute([$accountNo]);
         $acc = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -39,6 +45,8 @@ try {
             VALUES (?, ?, ?, ?, 'interbank_credit', ?, ?, ?, 'completed')
         ")->execute([$acc['user_id'], $acc['account_id'], (string)($n['from_account'] ?? ''), $accountNo, $amount, 'CB-' . $transferId,
                      'From ' . ($n['from_bank_code'] ?? '?') . ' via central bank transfer ' . $transferId]);
+        zurubank_desk($pdo)->recordReceipt((string)($n['reference_code'] ?? ('CB-' . $transferId)), $amount,
+            (string)($n['from_bank_code'] ?? ''), $accountNo, 'CENTRAL_BANK', 'CB-' . $transferId);
         $pdo->commit();
         cbn_reply(200, 'success', 'Recipient credited');
     }
@@ -61,6 +69,7 @@ try {
     } else {
         throw new DomainException('Unknown status ' . $status);
     }
+    zurubank_desk($pdo)->onSenderNotice($n);
     $pdo->commit();
     cbn_reply(200, 'success', $msg);
 } catch (DomainException $e) {
