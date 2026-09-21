@@ -7,7 +7,12 @@ require_once __DIR__ . '/../utils/hmac.php';
 $raw = file_get_contents('php://input');
 $ts = getallheaders()['X-CB-Callback-Timestamp'] ?? getallheaders()['x-cb-callback-timestamp'] ?? null;
 $sig = getallheaders()['X-CB-Callback-Signature'] ?? getallheaders()['x-cb-callback-signature'] ?? null;
-$central_secret = getenv('CENTRAL_BANK_CALLBACK_SECRET') ?: 'central-callback-secret';
+$central_secret = getenv('CENTRAL_BANK_CALLBACK_SECRET');
+if (!$central_secret) {
+    // No fallback written in code: without the real secret, nothing is trusted.
+    error_log('[bank_callback] CENTRAL_BANK_CALLBACK_SECRET not set');
+    http_response_code(503); echo json_encode(['status'=>'error','message'=>'Not configured']); exit;
+}
 
 if (!verify_request_hmac($raw, $sig, $ts, $central_secret)) {
     http_response_code(401); echo json_encode(['status'=>'error','message'=>'Invalid signature or timestamp']); exit;
