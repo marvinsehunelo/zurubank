@@ -9,6 +9,7 @@
 header('Content-Type: application/json');
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/central_bank_notice.php';
+require_once __DIR__ . '/settlement_stores.php';
 
 [$raw, $n] = cbn_read_verified();
 $transferId = (int)$n['transfer_id'];
@@ -39,11 +40,27 @@ try {
     $pdo->beginTransaction();
     if (!cbn_claim($pdo, 'ABSA', $n, $raw)) { $pdo->rollBack(); cbn_reply(200, 'success', 'Already processed'); }
 
-    if ($n['role'] !== 'recipient') { $pdo->commit(); cbn_reply(200, 'success', 'ABSA does not send interbank transfers yet; nothing to do'); }
+    if ($n['role'] !== 'recipient') {
+        // One of ABSA's own VouchMorph settlement payments: complete it, or put the money back.
+        $ref = (string)($n['reference_code'] ?? '');
+        $line = $pdo->prepare("SELECT amount, status FROM settlement_advice_inbox WHERE line_ref = ? AND bank_code = 'ABSA' FOR UPDATE");
+        $line->execute([$ref]);
+        $l = $line->fetch(PDO::FETCH_ASSOC);
+        if (!$l) throw new DomainException("No ABSA payment with reference {$ref}");
+        if ($l['status'] === 'SUBMITTED' && $n['status'] === 'rejected') {
+            absa_settlement_store($pdo)['move'](SettlementDesk::clearingAccount('ABSA'), (float)$l['amount']);
+        }
+        absa_desk($pdo)->onSenderNotice($n);
+        $pdo->commit();
+        cbn_reply(200, 'success', $n['status'] === 'rejected' ? 'Payment rejected; clearing account refunded' : 'Payment completed');
+    }
     if ($n['status'] !== 'approved') { $pdo->commit(); cbn_reply(200, 'success', 'Nothing to credit'); }
     if ($amount <= 0) throw new DomainException('Invalid amount');
 
     $accountNo = (string)($n['recipient_account_number'] ?? '');
+    if (SettlementDesk::isInternal($accountNo)) {
+        absa_settlement_store($pdo)['ensure_account']($accountNo, 'VouchMorph settlement');
+    }
     $stmt = $pdo->prepare("SELECT account_number FROM absa_accounts WHERE account_number = ? FOR UPDATE");
     $stmt->execute([$accountNo]);
     if (!$stmt->fetchColumn()) throw new DomainException('Recipient account not found at ABSA');
@@ -51,6 +68,8 @@ try {
     $pdo->prepare("UPDATE absa_accounts SET balance = balance + ? WHERE account_number = ?")->execute([$amount, $accountNo]);
     $pdo->prepare("INSERT INTO absa_central_bank_credits (transfer_id, account_number, amount, from_bank_code, from_account) VALUES (?, ?, ?, ?, ?)")
         ->execute([$transferId, $accountNo, $amount, (string)($n['from_bank_code'] ?? ''), (string)($n['from_account'] ?? '')]);
+    absa_desk($pdo)->recordReceipt((string)($n['reference_code'] ?? ('CB-' . $transferId)), $amount,
+        (string)($n['from_bank_code'] ?? ''), $accountNo, 'CENTRAL_BANK', 'CB-' . $transferId);
     $pdo->commit();
     cbn_reply(200, 'success', 'ABSA recipient credited');
 } catch (DomainException $e) {
