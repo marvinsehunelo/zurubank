@@ -74,6 +74,8 @@ try {
 
         foreach ($holds as $hold) {
             try {
+                // Each item is independent: a failure rolls back only this item.
+                $pdo->exec('SAVEPOINT expiry_item');
                 // A live code against a dead hold is cash with nothing
                 // behind it. Kill the code first, release second.
                 expire_codes_for_hold($pdo, $hold['hold_reference'], 'HOLD_EXPIRED');
@@ -88,7 +90,9 @@ try {
                 } else {
                     $skipped++;
                 }
+                $pdo->exec('RELEASE SAVEPOINT expiry_item');
             } catch (Throwable $e) {
+                try { $pdo->exec('ROLLBACK TO SAVEPOINT expiry_item'); } catch (Throwable $ignore) {}
                 $failed++;
                 error_log('[' . JOB . '] FAILED ' . $hold['hold_reference'] . ': ' . $e->getMessage());
             }
@@ -96,7 +100,7 @@ try {
 
         $pdo->commit();
 
-        if (count($holds) < BATCH_SIZE) {
+        if (count($holds) < BATCH_SIZE || $failed >= BATCH_SIZE) {
             break;
         }
     }
@@ -124,6 +128,8 @@ try {
 
     foreach ($stale as $v) {
         try {
+            // Each item is independent: a failure rolls back only this item.
+            $pdo->exec('SAVEPOINT expiry_item');
             // Only release the voucher if no live financial hold still
             // claims it — otherwise the swap is still in flight.
             if (!empty($v['source_hold_reference'])) {
@@ -149,7 +155,9 @@ try {
                 error_log(sprintf('[%s] voucher %s returned to active (%.2f)',
                     JOB, $v['voucher_number'], $r['amount']));
             }
+            $pdo->exec('RELEASE SAVEPOINT expiry_item');
         } catch (Throwable $e) {
+            try { $pdo->exec('ROLLBACK TO SAVEPOINT expiry_item'); } catch (Throwable $ignore) {}
             $failed++;
             error_log('[' . JOB . '] FAILED voucher ' . $v['voucher_number'] . ': ' . $e->getMessage());
         }
