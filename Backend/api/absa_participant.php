@@ -24,6 +24,18 @@ class AbsaParticipant
         $this->db = $db;
     }
 
+    private function settlementDesk(string $op, array $input): array
+    {
+        require_once __DIR__ . '/../helpers/CertificateManager.php';
+        require_once __DIR__ . '/settlement_stores.php';
+        if ($err = SettlementDesk::verifyVouchMorph($input, new CertificateManager('ABSA'))) {
+            http_response_code(401);
+            return ['success' => false, 'settled' => false, 'message' => $err];
+        }
+        $desk = absa_desk($this->db);
+        return $op === 'advice' ? $desk->receiveAdvice($input) : $desk->check($input);
+    }
+
     // ============================================================
     // ENTRY POINT / ROUTING
     // ============================================================
@@ -52,6 +64,10 @@ class AbsaParticipant
             'account_balance' => $this->getBalanceAction($input['account_number'] ?? ''),
             'create_reservation_account' => $this->createReservationAccount($input),
             'reservation_account_status' => $this->reservationAccountStatus($input),
+            // VouchMorph settlement (see settlement_desk.php). Certificate required,
+            // stricter than the legacy API-key paths accepted above.
+            'settlement_advice' => $this->settlementDesk('advice', $input),
+            'check_settlement' => $this->settlementDesk('check', $input),
             default => ['success' => false, 'message' => "Unknown action: {$action}"],
         };
     }
