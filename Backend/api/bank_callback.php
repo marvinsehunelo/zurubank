@@ -1,70 +1,73 @@
 <?php
-// zurubank/backend/api/bank_callback.php
+// zurubank/Backend/api/bank_callback.php
+//
+// Settlement notices from the central bank for ZuruBank customers.
+// See central_bank_notice.php for the signature and the roles.
+//
+// Before: fell back to a secret written in the code, and looked for
+// tables and columns ZuruBank does not have (external_transfer_queue,
+// origin_transaction_id, completed_at), so it could not process a notice
+// and could never credit an incoming payment. Now it completes, refunds
+// or credits against ZuruBank's real accounts and transactions tables.
 header('Content-Type: application/json');
 require_once __DIR__ . '/../config/db.php';
-require_once __DIR__ . '/../utils/hmac.php';
+require_once __DIR__ . '/central_bank_notice.php';
 
-$raw = file_get_contents('php://input');
-$ts = getallheaders()['X-CB-Callback-Timestamp'] ?? getallheaders()['x-cb-callback-timestamp'] ?? null;
-$sig = getallheaders()['X-CB-Callback-Signature'] ?? getallheaders()['x-cb-callback-signature'] ?? null;
-$central_secret = getenv('CENTRAL_BANK_CALLBACK_SECRET');
-if (!$central_secret) {
-    // No fallback written in code: without the real secret, nothing is trusted.
-    error_log('[bank_callback] CENTRAL_BANK_CALLBACK_SECRET not set');
-    http_response_code(503); echo json_encode(['status'=>'error','message'=>'Not configured']); exit;
-}
-
-if (!verify_request_hmac($raw, $sig, $ts, $central_secret)) {
-    http_response_code(401); echo json_encode(['status'=>'error','message'=>'Invalid signature or timestamp']); exit;
-}
-$data = json_decode($raw, true);
-if (!$data) { http_response_code(400); echo json_encode(['status'=>'error','message'=>'Invalid JSON']); exit; }
-
-$transfer_id = $data['transfer_id'] ?? null;
-$origin_tx = $data['origin_transaction_id'] ?? null;
-$status = $data['status'] ?? null;
-$amount = floatval($data['amount'] ?? 0);
-if (!$transfer_id || !$origin_tx || !$status) { http_response_code(400); echo json_encode(['status'=>'error','message'=>'Missing fields']); exit; }
-
-// Try to find local queued transfer
-$stmt = $pdo->prepare("SELECT * FROM external_transfer_queue WHERE transaction_id = ? OR origin_transaction_id = ? LIMIT 1");
-$stmt->execute([$transfer_id, $origin_tx]); $row = $stmt->fetch();
-
-if (!$row) {
-    $stmt = $pdo->prepare("SELECT * FROM transactions WHERE transaction_id = ? OR origin_transaction_id = ? LIMIT 1");
-    $stmt->execute([$transfer_id, $origin_tx]); $row = $stmt->fetch();
-}
-if (!$row) { http_response_code(404); echo json_encode(['status'=>'error','message'=>'Local transfer not found']); exit; }
+[$raw, $n] = cbn_read_verified();
+$role = $n['role'] === 'recipient' ? 'recipient' : 'sender';
+$status = (string)$n['status'];
+$amount = round((float)($n['amount'] ?? 0), 2);
+$transferId = (int)$n['transfer_id'];
 
 try {
-    if ($status === 'approved') {
-        $pdo->beginTransaction();
-        $stmt = $pdo->prepare("UPDATE external_transfer_queue SET status='approved', processed_at = NOW() WHERE transaction_id = ?");
-        $stmt->execute([$transfer_id]);
-        $stmt = $pdo->prepare("UPDATE transactions SET status='completed', completed_at = NOW() WHERE transaction_id = ? OR origin_transaction_id = ?");
-        $stmt->execute([$transfer_id, $origin_tx]);
+    $pdo->beginTransaction();
+    if (!cbn_claim($pdo, 'ZURUBANK', $n, $raw)) { $pdo->rollBack(); cbn_reply(200, 'success', 'Already processed'); }
+
+    if ($role === 'recipient') {
+        if ($status !== 'approved') { $pdo->commit(); cbn_reply(200, 'success', 'Nothing to credit'); }
+        if ($amount <= 0) throw new DomainException('Invalid amount');
+        $accountNo = (string)($n['recipient_account_number'] ?? '');
+        $stmt = $pdo->prepare("SELECT account_id, user_id, status FROM accounts WHERE account_number = ? LIMIT 1 FOR UPDATE");
+        $stmt->execute([$accountNo]);
+        $acc = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$acc) throw new DomainException('Recipient account not found at ZuruBank');
+        if (($acc['status'] ?? 'active') !== 'active') throw new DomainException('Recipient account is not active');
+
+        $pdo->prepare("UPDATE accounts SET balance = balance + ? WHERE account_id = ?")->execute([$amount, $acc['account_id']]);
+        $pdo->prepare("
+            INSERT INTO transactions (user_id, account_id, from_account, to_account, type, amount, reference, description, status)
+            VALUES (?, ?, ?, ?, 'interbank_credit', ?, ?, ?, 'completed')
+        ")->execute([$acc['user_id'], $acc['account_id'], (string)($n['from_account'] ?? ''), $accountNo, $amount, 'CB-' . $transferId,
+                     'From ' . ($n['from_bank_code'] ?? '?') . ' via central bank transfer ' . $transferId]);
         $pdo->commit();
-        echo json_encode(['status'=>'success','message'=>'Marked approved']);
-        exit;
-    } elseif ($status === 'rejected') {
-        $pdo->beginTransaction();
-        // refund sender (adjust to your schema)
-        $sourceAccount = $row['source_account'] ?? $row['account_number'] ?? null;
-        if ($sourceAccount) {
-            $stmt = $pdo->prepare("UPDATE accounts SET balance = balance + ? WHERE account_number = ?");
-            $stmt->execute([$amount, $sourceAccount]);
-        }
-        $stmt = $pdo->prepare("UPDATE external_transfer_queue SET status='rejected', processed_at = NOW() WHERE transaction_id = ?");
-        $stmt->execute([$transfer_id]);
-        $stmt = $pdo->prepare("UPDATE transactions SET status='failed', completed_at = NOW() WHERE transaction_id = ? OR origin_transaction_id = ?");
-        $stmt->execute([$transfer_id, $origin_tx]);
-        $pdo->commit();
-        echo json_encode(['status'=>'success','message'=>'Refunded and marked rejected']);
-        exit;
-    } else {
-        http_response_code(400); echo json_encode(['status'=>'error','message'=>'Unknown status']); exit;
+        cbn_reply(200, 'success', 'Recipient credited');
     }
-} catch (Exception $e) {
+
+    // Sender: one of our own outgoing transfers, found by the reference we sent.
+    $stmt = $pdo->prepare("SELECT transaction_id, account_id, from_account, amount, status FROM transactions WHERE reference = ? LIMIT 1 FOR UPDATE");
+    $stmt->execute([(string)($n['reference_code'] ?? '')]);
+    $tx = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$tx) throw new DomainException('No outgoing transfer with reference ' . ($n['reference_code'] ?? '?'));
+    if ($tx['status'] !== 'pending') { $pdo->commit(); cbn_reply(200, 'success', 'Transfer already ' . $tx['status']); }
+
+    if ($status === 'approved') {
+        $pdo->prepare("UPDATE transactions SET status = 'completed' WHERE transaction_id = ?")->execute([$tx['transaction_id']]);
+        $msg = 'Transfer completed';
+    } elseif ($status === 'rejected') {
+        $pdo->prepare("UPDATE accounts SET balance = balance + ? WHERE account_id = ?")->execute([(float)$tx['amount'], $tx['account_id']]);
+        $pdo->prepare("UPDATE transactions SET status = 'failed', description = COALESCE(description, '') || ? WHERE transaction_id = ?")
+            ->execute([' | Rejected by central bank: ' . substr((string)($n['message'] ?? ''), 0, 200) . '; refunded', $tx['transaction_id']]);
+        $msg = 'Transfer rejected; customer refunded';
+    } else {
+        throw new DomainException('Unknown status ' . $status);
+    }
+    $pdo->commit();
+    cbn_reply(200, 'success', $msg);
+} catch (DomainException $e) {
     if ($pdo->inTransaction()) $pdo->rollBack();
-    http_response_code(500); echo json_encode(['status'=>'error','message'=>$e->getMessage()]); exit;
+    cbn_reply(422, 'error', $e->getMessage());
+} catch (Throwable $e) {
+    if ($pdo->inTransaction()) $pdo->rollBack();
+    error_log('[bank_callback] ' . $e->getMessage());
+    cbn_reply(500, 'error', 'Notice could not be processed');
 }
