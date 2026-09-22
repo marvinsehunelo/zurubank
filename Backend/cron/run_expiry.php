@@ -6,7 +6,7 @@
 // unused_swap_slips.php moves money (escrow -> partner 60% / middleman 40%) and has
 // never run; it stays off until someone reviews what it will move, then set
 // ENABLE_SWAP_SLIP_JOB=1 on this service.
-$jobs = ['expire_codes.php', 'expire_holds.php'];
+$jobs = ['expire_codes.php', 'expire_holds.php', 'retry_vouchmorph_notifications.php'];
 if (in_array(strtolower((string)getenv('ENABLE_SWAP_SLIP_JOB')), ['1', 'true', 'yes'], true)) {
     $jobs[] = 'unused_swap_slips.php';
 }
