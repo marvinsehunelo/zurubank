@@ -77,27 +77,11 @@ function notifyVouchMorph($voucherNumber, $amount, $atmId, $cashoutReference, $r
         'swap_reference' => $swapReference,
         'timestamp' => time()
     ];
-    if (function_exists('generate_signature')) {
-        $payload['signature'] = generate_signature($payload, 'ZURUBANK');
-    }
-    
-    $ch = curl_init($vouchMorphUrl);
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
-    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json', 'X-Correlation-ID: ' . uniqid('ATM_', true), 'X-Source: ZURUBANK_ATM']);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
-    $response = curl_exec($ch);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $curlError = curl_error($ch);
-    curl_close($ch);
-    if ($curlError) {
-        return ['success' => false, 'message' => $curlError];
-    }
-    if ($httpCode < 200 || $httpCode >= 300) {
-        return ['success' => false, 'message' => "HTTP {$httpCode}", 'response' => $response];
-    }
-    return ['success' => true, 'response' => json_decode($response, true)];
+    // Signed (HMAC, secret shared with VouchMorph), 45 s wait, and queued for
+    // retry if VouchMorph does not confirm - see helpers/vouchmorph_webhook.php.
+    global $pdo;
+    require_once __DIR__ . '/../../../helpers/vouchmorph_webhook.php';
+    return vm_notify($pdo, $vouchMorphUrl, $payload, 'ZURUBANK');
 }
 
 $rawInput = file_get_contents("php://input");
