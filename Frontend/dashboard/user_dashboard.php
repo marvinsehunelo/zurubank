@@ -13,6 +13,15 @@ $full_name = $_SESSION['user']['full_name'];
 
 // --- Backend Dependency Check ---
 require_once __DIR__.'/../../Backend/config/db.php'; 
+require_once __DIR__.'/../../Backend/helpers/secondary_email.php';
+
+// Verified secondary email, for the card that links to secondary_email.php.
+$secondary_email = null;
+try {
+    $secondary_email = se_verified_email($pdo, (int)$user_id);
+} catch (Throwable $e) {
+    error_log("Dashboard secondary email lookup failed: " . $e->getMessage());
+}
 
 
 
@@ -131,6 +140,18 @@ body { font-family: 'Inter', sans-serif; font-size: 14px; } /* Base font size re
                         </div>
                     <?php endforeach; ?>
                 </div>
+            </div>
+
+            <div class="bg-white p-5 shadow-lg sharp-edge border border-gray-100">
+                <h2 class="text-lg font-bold text-primary mb-3 border-b pb-2">Secondary Email</h2>
+                <?php if ($secondary_email): ?>
+                    <p class="text-sm font-semibold text-gray-800"><?= htmlspecialchars($secondary_email['email']) ?></p>
+                    <p class="text-xs text-green-700 font-semibold mb-3">&#10003; Verified</p>
+                    <a href="secondary_email.php" class="text-xs text-primary hover:underline">Change or remove</a>
+                <?php else: ?>
+                    <p class="text-xs text-gray-600 mb-3">Add an email you can reach. We send the code here when you link this account to VouchMorph.</p>
+                    <a href="secondary_email.php" class="action-btn w-full sharp-btn btn-primary font-semibold text-center block">ADD &amp; VERIFY EMAIL</a>
+                <?php endif; ?>
             </div>
 
             <div class="bg-white p-5 shadow-lg sharp-edge border border-gray-100">
