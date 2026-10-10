@@ -15,11 +15,12 @@
 // database/migrations/2026_10_10_secondary_email.sql.
 //
 // Email goes out through Resend's HTTPS API: set RESEND_API_KEY, and
-// MAIL_FROM (default "ZuruBank <zurubank@vouchmorphn.com>"; the domain
-// must be verified in Resend).
+// SMTP_FROM_EMAIL / SMTP_FROM_NAME for the sender (default
+// "ZuruBank <zurubank@vouchmorphn.com>"). The sender's domain must be
+// verified in Resend.
 
 const SE_BANK_NAME          = 'ZuruBank';
-const SE_DEFAULT_FROM       = 'ZuruBank <zurubank@vouchmorphn.com>';
+const SE_DEFAULT_FROM_EMAIL = 'zurubank@vouchmorphn.com';
 const SE_BRAND_COLOR        = '#0B1D51';
 const SE_CODE_TTL           = 600;  // seconds a code is valid
 const SE_MAX_ATTEMPTS       = 5;    // wrong codes before a code is spent
@@ -230,7 +231,9 @@ function se_send_mail(string $to, string $subject, string $html): bool
         error_log('[SecondaryEmail] RESEND_API_KEY is not set; cannot send email');
         return false;
     }
-    $from = getenv('MAIL_FROM') ?: SE_DEFAULT_FROM;
+    $fromEmail = trim((string)getenv('SMTP_FROM_EMAIL')) ?: SE_DEFAULT_FROM_EMAIL;
+    $fromName  = trim((string)getenv('SMTP_FROM_NAME')) ?: SE_BANK_NAME;
+    $from      = "{$fromName} <{$fromEmail}>";
 
     $ch = curl_init('https://api.resend.com/emails');
     curl_setopt_array($ch, [
@@ -252,8 +255,11 @@ function se_send_mail(string $to, string $subject, string $html): bool
     curl_close($ch);
 
     if ($body === false || $status < 200 || $status >= 300) {
-        error_log('[SecondaryEmail] Resend send failed: ' . ($body === false ? $error : "HTTP {$status} " . substr((string)$body, 0, 300)));
+        error_log("[SecondaryEmail] Resend send from {$fromEmail} to " . se_mask($to) . ' failed: '
+            . ($body === false ? $error : "HTTP {$status} " . substr((string)$body, 0, 300)));
         return false;
     }
+    $id = json_decode((string)$body, true)['id'] ?? '?';
+    error_log("[SecondaryEmail] Resend accepted email from {$fromEmail} to " . se_mask($to) . " (id {$id})");
     return true;
 }
