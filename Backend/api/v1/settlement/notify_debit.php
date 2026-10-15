@@ -137,8 +137,49 @@ try {
         // ============================================================
         error_log("ZURUBANK NOTIFY_DEBIT: Found ACCOUNT hold ID={$accountHold['id']}, account_id={$accountHold['account_id']}");
 
-        if (abs(floatval($accountHold['amount']) - floatval($amount)) > 0.01) {
-            throw new Exception("Amount mismatch. Hold: {$accountHold['amount']}, Requested: $amount");
+        // ============================================================
+        // PARTIAL CAPTURE (2026-10-15). VouchMorph debits less than the
+        // hold when a card swipe uses part of a hooked source, or when an
+        // expired cash-out keeps only its fees. A debit that was not the
+        // whole hold used to be refused ("Amount mismatch"): the swipe was
+        // then billed to the customer as a shortfall although the money
+        // was held, and the fees on an expired cash-out were never taken.
+        // Now the requested amount is captured and the rest stays held
+        // under the same reference: a later debit can take more, and a
+        // release (or expiry) returns what is left. A debit larger than
+        // what is held is still refused.
+        // ============================================================
+        $heldNow = round(floatval($accountHold['amount']), 2);
+        $requested = round(floatval($amount), 2);
+        if ($requested - $heldNow > 0.01) {
+            throw new Exception("Debit {$requested} is more than the {$heldNow} held");
+        }
+        if ($heldNow - $requested > 0.01) {
+            if (!$pdo->query("SELECT 1 FROM information_schema.columns WHERE table_name = 'financial_holds' AND column_name = 'captured_amount'")->fetchColumn()) {
+                $pdo->exec("ALTER TABLE financial_holds ADD COLUMN IF NOT EXISTS captured_amount DECIMAL(20,4) NOT NULL DEFAULT 0");
+            }
+            $pdo->prepare("
+                UPDATE financial_holds
+                SET amount = amount - :captured, captured_amount = captured_amount + :captured2, updated_at = NOW()
+                WHERE id = :hold_id
+            ")->execute(['captured' => $requested, 'captured2' => $requested, 'hold_id' => $accountHold['id']]);
+            $bal = $pdo->prepare("SELECT balance FROM accounts WHERE account_id = :account_id");
+            $bal->execute(['account_id' => $accountHold['account_id']]);
+            $pdo->commit();
+            error_log("ZURUBANK NOTIFY_DEBIT: partial capture {$requested} of {$heldNow} on {$holdReference}; " . round($heldNow - $requested, 2) . " still held");
+            send_signed_response([
+                "status" => "SUCCESS",
+                "debited" => true,
+                "partial" => true,
+                "hold_reference" => $holdReference,
+                "amount" => $requested,
+                "remaining_held" => round($heldNow - $requested, 2),
+                "hold_status" => "HELD",
+                "asset_type" => "ACCOUNT",
+                "total_balance" => floatval($bal->fetchColumn()),
+                "message" => "Captured {$requested}; " . round($heldNow - $requested, 2) . " still held under {$holdReference}",
+            ]);
+            exit;
         }
 
         // Read current balance for the response payload only —
