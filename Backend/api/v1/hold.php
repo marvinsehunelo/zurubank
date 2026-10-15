@@ -9,6 +9,40 @@ require_once __DIR__ . '/../../config/db.php';
 require_once __DIR__ . '/../../helpers/crypto.php';
 require_once __DIR__ . '/../../helpers/CertificateManager.php';
 
+/**
+ * A release asked for a hold that is no longer HELD. It used to answer only
+ * "No active hold found", so VouchMorph could not tell an expired hold (the
+ * money is back) from a debited one, and asked again every five minutes for
+ * days. The answer now says what became of the hold, and repeating a release
+ * is harmless: released or expired -> success, already_released; debited ->
+ * not released, hold_status DEBITED; unknown -> hold_status NOT_FOUND.
+ */
+final class HoldNotLive extends Exception
+{
+    public array $payload;
+
+    public static function lookup(PDO $pdo, string $ref): self
+    {
+        $st = $pdo->prepare("SELECT status, amount FROM financial_holds WHERE hold_reference = ? ORDER BY id DESC LIMIT 1");
+        $st->execute([$ref]);
+        $h = $st->fetch(PDO::FETCH_ASSOC);
+        $state = $h ? strtoupper((string)$h['status']) : 'NOT_FOUND';
+        $freed = in_array($state, ['RELEASED', 'EXPIRED', 'PARTIALLY_RELEASED', 'CANCELLED'], true);
+        $e = new self($freed ? "Hold already released (status: {$state})"
+            : ($state === 'HELD' ? "Hold {$ref} is held, but not on the account or wallet named in the request"
+            : ($h ? "Hold is not active (status: {$state})" : 'No hold found for reference: ' . $ref)));
+        $e->payload = [
+            'status' => $freed ? 'SUCCESS' : 'ERROR',
+            'released' => $freed,
+            'already_released' => $freed,
+            'hold_status' => $state,
+            'hold_reference' => $ref,
+            'message' => $e->getMessage(),
+        ];
+        return $e;
+    }
+}
+
 header('Content-Type: application/json');
 
 try {
@@ -525,7 +559,7 @@ try {
             $hold = $stmt->fetch(PDO::FETCH_ASSOC);
 
             if (!$hold) {
-                throw new Exception("No active hold found");
+                throw HoldNotLive::lookup($pdo, (string)$holdReference);
             }
 
             $fullHeldAmount = floatval($hold['amount']);
@@ -716,7 +750,7 @@ try {
             $released = $stmt->fetch(PDO::FETCH_ASSOC);
             
             if (!$released) {
-                throw new Exception("No active hold found");
+                throw HoldNotLive::lookup($pdo, (string)$holdReference);
             }
             
             $assetId = $released['wallet_id'] ?? null;
@@ -750,6 +784,12 @@ try {
     
     send_signed_response($responsePayload);
 
+} catch (HoldNotLive $e) {
+    if (isset($pdo) && $pdo->inTransaction()) {
+        $pdo->rollBack();
+    }
+    error_log("ZURUBANK HOLD: release of {$e->payload['hold_reference']} - {$e->getMessage()}");
+    send_signed_response($e->payload + ['timestamp' => time()]);
 } catch (Exception $e) {
     if (isset($pdo) && $pdo->inTransaction()) {
         $pdo->rollBack();
