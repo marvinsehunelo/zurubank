@@ -1,0 +1,6 @@
+# Logs and scratch output never belong in this public repository.
+*.log
+*_error_log.txt
+/Backend/tmp/*.log
+.env
+.env.*

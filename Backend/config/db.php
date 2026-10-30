@@ -17,13 +17,19 @@ if ($database_url) {
     
     error_log("Using DATABASE_URL: $host:$port/$dbname");
 } else {
-    // Fallback to individual PG variables or defaults
+    // Fallback to individual PG variables. The password only ever comes from the environment.
     $host = getenv('PGHOST') ?: 'postgres.railway.internal';
     $port = getenv('PGPORT') ?: '5432';
     $dbname = getenv('PGDATABASE') ?: 'railway';
     $username = getenv('PGUSER') ?: 'postgres';
-    $password = getenv('PGPASSWORD') ?: 'KZjtysMtAaUcBpzPXjsqeYmgOuGBmPKx';
-    
+    $password = getenv('PGPASSWORD');
+    if ($password === false || $password === '') {
+        error_log("❌ ZuruBank: set DATABASE_URL or PGPASSWORD; no database password is configured");
+        http_response_code(500);
+        echo json_encode(["error" => "Database connection failed"]);
+        exit;
+    }
+
     error_log("Using PG variables: $host:$port/$dbname");
 }
 
