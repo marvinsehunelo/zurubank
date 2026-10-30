@@ -79,6 +79,15 @@
                         <li class="flex items-center"><span class="w-3 h-3 bg-gray-400 rounded-full mr-2"></span> Active Admin: <span id="admin-username"></span></li>
                     </ul>
                 </div>
+
+                <!-- Customers & KYC -->
+                <div class="card p-6 rounded-xl shadow-lg lg:col-span-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                    <div>
+                        <h3 class="text-2xl font-semibold text-zurubank mb-1">Customers &amp; KYC</h3>
+                        <p class="text-gray-700 text-sm">List customers, request their verified KYC from KYC Bank, follow each request and approve or reject KYC from the shared profile.</p>
+                    </div>
+                    <a href="admin_kyc.php" class="py-3 px-6 rounded-lg font-semibold btn-primary shadow-md text-center whitespace-nowrap">Open Customers &amp; KYC</a>
+                </div>
             </div>
         </div>
     </div>
