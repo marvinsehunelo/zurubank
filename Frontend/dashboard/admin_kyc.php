@@ -14,14 +14,18 @@
 
 if (session_status() === PHP_SESSION_NONE) session_start();
 
-if (empty($_SESSION['admin_logged_in']) || $_SESSION['admin_logged_in'] !== true) {
+require_once __DIR__ . '/../../Backend/config/db.php';
+require_once __DIR__ . '/../../Backend/auth/admin_users.php';
+require_once __DIR__ . '/../../Backend/integrations/kycbank/kycbank.php';
+
+// Every staff member has their own account (admin_users), so requests, reviews and audit
+// entries record who did them.
+$me = zb_admin_current($pdo);
+if ($me === null) {
     header('Location: admin_dashboard.php');
     exit;
 }
-$staffId = (int)($_SESSION['admin_user_id'] ?? 0);
-
-require_once __DIR__ . '/../../Backend/config/db.php';
-require_once __DIR__ . '/../../Backend/integrations/kycbank/kycbank.php';
+$staffId = (int)$me['id'];
 
 header('X-Frame-Options: DENY');
 header('Cache-Control: no-store');
@@ -41,6 +45,19 @@ function kb_date(?string $ts, bool $withTime = true): string
     if (!$ts) return '—';
     $t = strtotime($ts);
     return $t ? date($withTime ? 'j M Y, H:i' : 'j M Y', $t) : '—';
+}
+
+/** "Full name (username)" for a staff ID, for review and request lines. */
+function kb_staff_name(PDO $pdo, $id): string
+{
+    static $cache = [];
+    $id = (int)$id;
+    if ($id <= 0) return 'unknown staff';
+    if (!array_key_exists($id, $cache)) {
+        $row = zb_admin_find($pdo, $id);
+        $cache[$id] = $row ? $row['full_name'] . ' (' . $row['username'] . ')' : 'staff #' . $id;
+    }
+    return $cache[$id];
 }
 
 function kb_flash(string $type, string $msg): void
@@ -486,7 +503,7 @@ $metaKeys = ['consentId', 'profileVersion', 'level', 'verifiedAt', 'verification
                 </form>
             </div>
             <?php if ($r['review_decision']): ?>
-            <p class="text-xs text-gray-500 mt-3">Last decision: <?= kb_h($r['review_decision']) ?> by admin #<?= kb_h($r['reviewed_by']) ?> on <?= kb_h(kb_date($r['reviewed_at'])) ?>.</p>
+            <p class="text-xs text-gray-500 mt-3">Last decision: <?= kb_h($r['review_decision']) ?> by <?= kb_h(kb_staff_name($pdo, $r['reviewed_by'])) ?> on <?= kb_h(kb_date($r['reviewed_at'])) ?>.</p>
             <?php endif; ?>
         </div>
         <?php endif; ?>

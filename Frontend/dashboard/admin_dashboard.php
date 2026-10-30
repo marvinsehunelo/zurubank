@@ -38,7 +38,7 @@
                     <button type="submit" id="login-btn" class="w-full py-2 px-4 border border-transparent rounded-lg shadow-sm text-lg font-semibold btn-primary hover:shadow-lg focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-accent">
                         Sign In
                     </button>
-                    <p class="text-xs text-gray-500 mt-4 text-center">Default: admin_user / supersecurepassword</p>
+                    <p class="text-xs text-gray-500 mt-4 text-center">Sign in with your own staff account. Admins add staff under Staff accounts.</p>
                 </form>
             </div>
         </div>
@@ -87,6 +87,15 @@
                         <p class="text-gray-700 text-sm">List customers, request their verified KYC from KYC Bank, follow each request and approve or reject KYC from the shared profile.</p>
                     </div>
                     <a href="admin_kyc.php" class="py-3 px-6 rounded-lg font-semibold btn-primary shadow-md text-center whitespace-nowrap">Open Customers &amp; KYC</a>
+                </div>
+
+                <!-- Staff accounts -->
+                <div class="card p-6 rounded-xl shadow-lg lg:col-span-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                    <div>
+                        <h3 class="text-2xl font-semibold text-zurubank mb-1">Staff accounts</h3>
+                        <p class="text-gray-700 text-sm">Each member of staff signs in with their own account, so every KYC decision names who made it. Admins add and deactivate staff here.</p>
+                    </div>
+                    <a href="admin_staff.php" class="py-3 px-6 rounded-lg font-semibold btn-primary shadow-md text-center whitespace-nowrap">Open Staff accounts</a>
                 </div>
             </div>
         </div>
@@ -145,7 +154,7 @@
                 const result = await response.json();
                 
                 if (result.success) {
-                    currentUsername = result.user || 'Admin';
+                    currentUsername = result.name || result.user || 'Admin';
                     setView(true);
                 } else {
                     setView(false);
@@ -177,7 +186,7 @@
                 const result = await response.json();
 
                 if (result.success) {
-                    currentUsername = formData.get('username');
+                    currentUsername = result.name || formData.get('username');
                     setView(true);
                     showMessage('Welcome, ' + currentUsername + '!', 'success');
                 } else {
@@ -229,7 +238,7 @@
                 });
                 const result = await response.json();
 
-                if (result.success) {
+                if (result.success || result.status === 'success') {
                     showMessage(result.message, 'success');
                     console.log('Processing details:', result);
                 } else {

@@ -6,6 +6,20 @@
 
 header('Content-Type: application/json');
 
+// From the web this moves money, so only a signed-in admin may run it. The cron runner calls
+// Backend/cron/unused_swap_slips.php from the command line instead.
+if (php_sapi_name() !== 'cli') {
+    if (session_status() === PHP_SESSION_NONE) session_start();
+    require_once __DIR__ . '/../../Backend/config/db.php';
+    require_once __DIR__ . '/../../Backend/auth/admin_users.php';
+    $me = zb_admin_current($pdo);
+    if ($me === null || $me['role'] !== 'admin' || $_SERVER['REQUEST_METHOD'] !== 'POST') {
+        http_response_code(403);
+        echo json_encode(['status' => 'error', 'message' => 'Admins only']);
+        exit;
+    }
+}
+
 try {
     // Include function
     require_once __DIR__ . '/processExpiredSwaps.php';
