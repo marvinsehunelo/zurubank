@@ -27,7 +27,7 @@ try {
 
 // Fetch user accounts
 try {
-    $stmt = $pdo->prepare("SELECT account_id, account_number, account_type, balance FROM accounts WHERE user_id = ?");
+    $stmt = $pdo->prepare("SELECT account_id, account_number, account_type, balance, held_balance FROM accounts WHERE user_id = ?");
     $stmt->execute([$user_id]);
     $accounts = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
@@ -136,7 +136,11 @@ body { font-family: 'Inter', sans-serif; font-size: 14px; } /* Base font size re
                     <?php foreach ($accounts as $acc): ?>
                         <div class="p-2 border-b border-gray-100 sharp-edge bg-gray-50 hover:bg-white transition-colors flex justify-between">
                             <p class="font-semibold text-gray-700"><?= htmlspecialchars(ucfirst($acc['account_type'])) ?> - <?= htmlspecialchars($acc['account_number']) ?></p>
-                            <p class="font-bold text-gray-900">P<?= number_format($acc['balance'],2) ?></p>
+                            <p class="font-bold text-gray-900 text-right">P<?= number_format($acc['balance'],2) ?>
+                                <?php if ((float)($acc['held_balance'] ?? 0) > 0): ?>
+                                    <span class="block text-xs font-normal text-gray-500">On hold: P<?= number_format($acc['held_balance'],2) ?> &middot; Available: P<?= number_format($acc['balance'] - $acc['held_balance'],2) ?></span>
+                                <?php endif; ?>
+                            </p>
                         </div>
                     <?php endforeach; ?>
                 </div>

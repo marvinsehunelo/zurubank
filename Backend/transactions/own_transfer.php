@@ -54,7 +54,8 @@ try {
     $tgtAcc = $stmt->fetch(PDO::FETCH_ASSOC);
     if (!$tgtAcc) throw new Exception("Target account not found");
 
-    if ($srcAcc['balance'] < $amount) throw new Exception("Insufficient funds in source account");
+    // held money (held_balance) is in balance but cannot be spent
+    if (($srcAcc['balance'] - ($srcAcc['held_balance'] ?? 0)) < $amount) throw new Exception("Insufficient funds in source account");
 
     // ------------------ UPDATE BALANCES ------------------
     $stmt = $pdo->prepare("UPDATE accounts SET balance = balance - ? WHERE account_id = ?");

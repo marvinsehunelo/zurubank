@@ -46,7 +46,8 @@ try {
     $stmt->execute([$source, $userId]);
     $srcAcc = $stmt->fetch(PDO::FETCH_ASSOC);
     if (!$srcAcc) throw new Exception("Source account not found");
-    if ($srcAcc['balance'] < $amount) throw new Exception("Insufficient funds in source account");
+    // held money (held_balance) is in balance but cannot be spent
+    if (($srcAcc['balance'] - ($srcAcc['held_balance'] ?? 0)) < $amount) throw new Exception("Insufficient funds in source account");
 
     // Recipient account (internal, can be any user)
     $stmt = $pdo->prepare("SELECT * FROM accounts WHERE account_number = ? FOR UPDATE");

@@ -102,8 +102,9 @@ try {
 
     if ((bool)($srcAcc['is_frozen'] ?? 0)) throw new Exception("Source Escrow account is frozen.");
 
-    if ($srcAcc["balance"] < $amount) {
-        throw new Exception("Insufficient escrow funds (Available: " . number_format($srcAcc["balance"], 2) . ")");
+    $srcAvailable = $srcAcc["balance"] - ($srcAcc["held_balance"] ?? 0); // held money cannot be spent
+    if ($srcAvailable < $amount) {
+        throw new Exception("Insufficient escrow funds (Available: " . number_format($srcAvailable, 2) . ")");
     }
 
     // --------------------------------------------------------------------

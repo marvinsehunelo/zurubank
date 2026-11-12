@@ -43,11 +43,11 @@ try {
             $sender_phone = $sender['phone'];
 
             // Check balance
-            $stmt = $pdo->prepare("SELECT balance FROM accounts WHERE account_id=? AND user_id=?");
+            $stmt = $pdo->prepare("SELECT balance, held_balance FROM accounts WHERE account_id=? AND user_id=?");
             $stmt->execute([$from_account_id, $user_id]);
             $acc = $stmt->fetch(PDO::FETCH_ASSOC);
             if (!$acc) throw new Exception("Account not found");
-            if ($acc['balance'] < $amount) throw new Exception("Insufficient funds");
+            if (($acc['balance'] - ($acc['held_balance'] ?? 0)) < $amount) throw new Exception("Insufficient funds");
 
             $pdo->beginTransaction();
 

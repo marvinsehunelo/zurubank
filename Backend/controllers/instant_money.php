@@ -55,7 +55,8 @@ try {
 
             $total_fees = $creation_fee + $swap_fee + $admin_fee + $sms_fee;
             $total_deduction = $amount + $total_fees;
-            if ($sender_acc['balance'] < $total_deduction) throw new Exception("Insufficient funds");
+            // held money (held_balance) is in balance but cannot be spent
+            if (($sender_acc['balance'] - ($sender_acc['held_balance'] ?? 0)) < $total_deduction) throw new Exception("Insufficient funds");
 
             $pdo->beginTransaction();
 
