@@ -3,6 +3,7 @@ if (session_status() === PHP_SESSION_NONE) session_start();
 header('Content-Type: application/json');
 
 require_once __DIR__ . '/../config/db.php'; // $pdo
+require_once __DIR__ . '/../lib/account_holds.php';
 
 // Load settings
 $config = require_once __DIR__ . '/../config/settings.php';
@@ -55,7 +56,8 @@ try {
 
             $total_fees = $creation_fee + $swap_fee + $admin_fee + $sms_fee;
             $total_deduction = $amount + $total_fees;
-            if ($sender_acc['balance'] < $total_deduction) throw new Exception("Insufficient funds");
+            // held money (held_balance) is in balance but cannot be spent
+            if (($sender_acc['balance'] - ($sender_acc['held_balance'] ?? 0)) < $total_deduction) throw new Exception("Insufficient funds");
 
             $pdo->beginTransaction();
 
@@ -218,5 +220,5 @@ try {
 } catch (Exception $e) {
     if ($pdo->inTransaction()) $pdo->rollBack();
     error_log("Voucher API Error: " . $e->getMessage() . " on line " . $e->getLine());
-    jsonResponse(false, "Transaction failed: " . $e->getMessage());
+    jsonResponse(false, "Transaction failed: " . hold_refusal_message($e));
 }

@@ -58,8 +58,13 @@ if ($certificate) {
 // Method 2: Legacy signature verification (backward compatible)
 else if ($signature) {
     $payloadToVerify = ['trace' => $trace];
-    $publicKey = get_requester_public_key($requester, $pdo);
-    if ($publicKey) {
+    $publicKey = status_legacy_public_key($requester, $pdo);
+    if ($publicKey && !function_exists('verify_signature')) {
+        // No verify_signature() exists anywhere in this code base: report
+        // the query as unverified (verification is optional here) instead
+        // of dying on an undefined function.
+        error_log("ZURUBANK STATUS: legacy signature from {$requester} not checked (no verifier available)");
+    } elseif ($publicKey) {
         $signatureVerified = verify_signature($payloadToVerify, $signature, $publicKey, $timestamp);
         $verificationMethod = 'legacy_signature';
         if ($signatureVerified) {
@@ -103,7 +108,7 @@ try {
         // Add reversal info if reversed
         if ($transaction['status'] === 'reversed') {
             $revStmt = $pdo->prepare("
-                SELECT reversal_trace, reason, reversed_by, reversed_at 
+                SELECT * -- live has no reversed_by column (backup.sql)
                 FROM transaction_reversals 
                 WHERE original_trace = :trace
                 LIMIT 1
@@ -114,7 +119,7 @@ try {
                 $responsePayload['reversal_info'] = [
                     'reversal_trace' => $reversal['reversal_trace'],
                     'reason' => $reversal['reason'],
-                    'reversed_by' => $reversal['reversed_by'],
+                    'reversed_by' => $reversal['reversed_by'] ?? null,
                     'reversed_at' => $reversal['reversed_at']
                 ];
             }
@@ -242,9 +247,11 @@ try {
 }
 
 /**
- * Get public key for a requester (legacy fallback)
+ * Get public key for a requester (legacy fallback). Named for this file:
+ * helpers/crypto.php has its own get_requester_public_key(), and two
+ * functions with one name made every request here die ("Cannot redeclare").
  */
-function get_requester_public_key($requester, $pdo) {
+function status_legacy_public_key($requester, $pdo) {
     // First check environment variable
     $envKey = strtoupper($requester) . '_PUBLIC_KEY';
     $publicKey = getenv($envKey);

@@ -7,6 +7,7 @@ ini_set('display_errors', '0');
 
 header("Content-Type: application/json; charset=utf-8");
 require_once __DIR__ . "/../config/db.php";
+require_once __DIR__ . '/../lib/account_holds.php';
 
 /**
  * Sends a structured JSON response and terminates the script.
@@ -102,8 +103,9 @@ try {
 
     if ((bool)($srcAcc['is_frozen'] ?? 0)) throw new Exception("Source Escrow account is frozen.");
 
-    if ($srcAcc["balance"] < $amount) {
-        throw new Exception("Insufficient escrow funds (Available: " . number_format($srcAcc["balance"], 2) . ")");
+    $srcAvailable = $srcAcc["balance"] - ($srcAcc["held_balance"] ?? 0); // held money cannot be spent
+    if ($srcAvailable < $amount) {
+        throw new Exception("Insufficient escrow funds (Available: " . number_format($srcAvailable, 2) . ")");
     }
 
     // --------------------------------------------------------------------
@@ -180,5 +182,5 @@ try {
 } catch (Exception $e) {
     if (isset($pdo) && $pdo->inTransaction()) $pdo->rollBack();
     
-    jsonResponse("error", $e->getMessage());
+    jsonResponse("error", hold_refusal_message($e));
 }

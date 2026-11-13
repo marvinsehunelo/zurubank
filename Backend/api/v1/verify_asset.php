@@ -7,6 +7,7 @@
 
 require_once __DIR__ . '/../../config/db.php';
 require_once __DIR__ . '/../../helpers/crypto.php';
+require_once __DIR__ . '/../../lib/held_balance_schema.php';
 
 header("Content-Type: application/json");
 
@@ -203,6 +204,11 @@ try {
         if (empty($accountNumber)) {
             throw new Exception("Account number required for ACCOUNT asset type");
         }
+        // held_balance is needed to tell what can be spent; the first
+        // request after the deploy applies it (lib/held_balance_schema.php).
+        if (!held_balance_ready($pdo)) {
+            throw new Exception(HELD_BALANCE_UNAVAILABLE);
+        }
 
         $stmt = $pdo->prepare("
             SELECT 
@@ -211,6 +217,7 @@ try {
                 account_number,
                 account_type,
                 balance,
+                held_balance,
                 currency,
                 status,
                 created_at
@@ -229,7 +236,11 @@ try {
             throw new Exception("Account is not active (status: {$account['status']})");
         }
 
-        $availableBalance = floatval($account['balance']);
+        // Money set aside by live holds is still in `balance` but cannot be
+        // spent, so sufficiency is judged on balance - held_balance.
+        $totalBalance = floatval($account['balance']);
+        $heldBalance = floatval($account['held_balance']);
+        $availableBalance = round($totalBalance - $heldBalance, 4);
         
         if ($amount > 0 && $availableBalance < $amount) {
             throw new Exception("Insufficient balance. Available: $availableBalance, Requested: $amount");
@@ -272,6 +283,8 @@ try {
             "account_number" => $account['account_number'],
             "available_balance" => $availableBalance,
             "balance" => $availableBalance,
+            "total_balance" => $totalBalance,
+            "held_balance" => $heldBalance,
             "holder_name" => $holderName,
             "currency" => $account['currency'] ?? 'BWP',
             "account_type" => $account['account_type'],

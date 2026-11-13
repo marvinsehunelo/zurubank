@@ -2,8 +2,9 @@
 /**
  * Backend/cron/expire_holds.php — ZURUBANK
  *
- * Releases every expired hold, restoring the amount to the customer's
- * balance, and returns any voucher stuck on hold to 'active'.
+ * Releases every expired hold, taking the amount off the account's
+ * held_balance so the customer can spend it again (balance itself does
+ * not move), and returns any voucher stuck on hold to 'active'.
  *
  * Nothing here calls VouchMorph or waits for it. That is the point: a
  * hold must come off the customer's money whether or not the orchestrator
@@ -22,6 +23,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../lib/hold_release.php';
+require_once __DIR__ . '/../lib/held_balance_schema.php';
 
 const JOB        = 'expire_holds';
 const BATCH_SIZE = 200;
@@ -49,6 +51,12 @@ if (!$lock->fetchColumn()) {
 }
 
 try {
+    // The held-balance schema must be in place before any hold is expired.
+    // TRUE: also convert holds the old code placed while the deploy was
+    // switching over (one cheap query when there are none). If the schema
+    // cannot be applied, this run fails closed (logged) and retries next time.
+    held_balance_ensure($pdo, true);
+
     // ---------------------------------------------------------------
     // 1. financial_holds past expiry
     // ---------------------------------------------------------------
@@ -84,7 +92,7 @@ try {
 
                 if ($r['released']) {
                     $released++;
-                    error_log(sprintf('[%s] released %s %s amount=%.2f balance %.2f->%.2f latency=%ss',
+                    error_log(sprintf('[%s] released %s %s amount=%.2f available %.2f->%.2f latency=%ss',
                         JOB, $hold['hold_reference'], $r['subject_type'], $r['amount'],
                         $r['balance_before'], $r['balance_after'], $r['latency_seconds'] ?? '?'));
                 } else {

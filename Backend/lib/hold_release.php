@@ -5,9 +5,12 @@
  * Shared release path for cron/expire_holds.php and cron/expire_codes.php.
  *
  * ZURUBANK-SPECIFIC BEHAVIOUR
- *   ACCOUNT: hold.php SUBTRACTS from accounts.balance when the hold is
- *            placed, so release ADDS it back. There is no held_balance
- *            column in this schema.
+ *   ACCOUNT: hold.php leaves accounts.balance alone and adds the amount
+ *            to accounts.held_balance, so release (and expiry) takes it
+ *            off held_balance and does not move balance. A hold placed
+ *            before held_balance existed (in_held_balance = FALSE) was
+ *            subtracted from balance, so that one is added back instead.
+ *            Both cases live in Backend/lib/account_holds.php.
  *   WALLET:  hold.php inserts the hold row but NEVER touches
  *            instant_money_wallets.balance. So release must NOT credit
  *            anything — crediting here would create money. Release only
@@ -19,6 +22,8 @@
  */
 
 declare(strict_types=1);
+
+require_once __DIR__ . '/account_holds.php';
 
 /**
  * Release one financial_holds row. Call INSIDE a transaction, after
@@ -44,23 +49,13 @@ function release_hold(PDO $pdo, array $hold, string $reason, string $actor): arr
     if (!empty($hold['account_id'])) {
         $subjectType = 'ACCOUNT';
 
-        $stmt = $pdo->prepare("SELECT balance FROM accounts WHERE account_id = :id FOR UPDATE");
-        $stmt->execute([':id' => $hold['account_id']]);
-        $balanceBefore = $stmt->fetchColumn();
+        $before = account_hold_lock($pdo, $hold['account_id']);
+        $after  = account_hold_release($pdo, $hold);
 
-        if ($balanceBefore === false) {
-            throw new RuntimeException("Hold {$ref}: account_id={$hold['account_id']} not found");
-        }
-        $balanceBefore = (float)$balanceBefore;
-
-        // Give the money back. PLACE removed it from balance outright.
-        $stmt = $pdo->prepare("
-            UPDATE accounts SET balance = balance + :amount
-            WHERE account_id = :id
-            RETURNING balance
-        ");
-        $stmt->execute([':amount' => $amount, ':id' => $hold['account_id']]);
-        $balanceAfter = (float)$stmt->fetchColumn();
+        // hold_release_log records the money the customer can spend, which
+        // is what a release changes: it goes up by the hold amount.
+        $balanceBefore = $before['available_balance'];
+        $balanceAfter  = $after['available_balance'];
 
     } elseif (!empty($hold['wallet_id'])) {
         $subjectType = 'WALLET';
@@ -196,7 +191,32 @@ function expire_codes_for_hold(PDO $pdo, ?string $holdReference, string $reason)
     return $n;
 }
 
+/**
+ * Audit row for a release. It is written inside the release's transaction,
+ * so it runs in a savepoint: a failed log write is logged and never undoes
+ * the release itself.
+ */
 function log_release(PDO $pdo, array $r): void
+{
+    $inTx = $pdo->inTransaction();
+    try {
+        if ($inTx) {
+            $pdo->exec('SAVEPOINT log_release');
+        }
+        log_release_insert($pdo, $r);
+        if ($inTx) {
+            $pdo->exec('RELEASE SAVEPOINT log_release');
+        }
+    } catch (Throwable $e) {
+        if ($inTx) {
+            try { $pdo->exec('ROLLBACK TO SAVEPOINT log_release'); } catch (Throwable $ignore) {}
+        }
+        error_log('HOLD_RELEASE: hold_release_log row not written for ' . ($r['hold_reference'] ?? '?')
+            . ' (the release stands): ' . substr(preg_replace('/\s+/', ' ', $e->getMessage()), 0, 300));
+    }
+}
+
+function log_release_insert(PDO $pdo, array $r): void
 {
     $stmt = $pdo->prepare("
         INSERT INTO hold_release_log
@@ -224,6 +244,15 @@ function log_release(PDO $pdo, array $r): void
 }
 
 function log_cron_run(PDO $pdo, string $job, float $startedAt, int $processed, int $failed, string $detail = ''): void
+{
+    try {
+        log_cron_run_insert($pdo, $job, $startedAt, $processed, $failed, $detail);
+    } catch (Throwable $e) {
+        error_log("[{$job}] cron_runs row not written: " . substr(preg_replace('/\s+/', ' ', $e->getMessage()), 0, 300));
+    }
+}
+
+function log_cron_run_insert(PDO $pdo, string $job, float $startedAt, int $processed, int $failed, string $detail): void
 {
     $stmt = $pdo->prepare("
         INSERT INTO cron_runs (job, started_at, processed, failed, detail)

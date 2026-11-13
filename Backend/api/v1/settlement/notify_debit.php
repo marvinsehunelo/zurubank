@@ -4,11 +4,9 @@
 // Release held funds and record interbank settlement
 // UPDATED: Certificate-based verification + ACCOUNT/VOUCHER branch
 // FIXED: Matches actual table structures
-// FIXED: Removed double-decrement of `balance` in the ACCOUNT path —
-//        hold.php already subtracts the hold amount from `balance`
-//        at PLACE_HOLD time. This endpoint only finalizes the hold's
-//        status; it must NOT touch `balance` again, or every debit
-//        silently charges the account twice.
+// ACCOUNT path: the held amount stays in `balance` (set aside in
+//        `held_balance`) until this endpoint debits it. The debit takes
+//        it out of both, once. See Backend/lib/account_holds.php.
 // FIXED: Removed redeemed_by_cert_verified column (does not exist in table)
 // FIXED (this pass): the voucher UPDATE was writing to two columns
 //        that do NOT exist on instant_money_vouchers -
@@ -34,6 +32,9 @@ header('Content-Type: application/json');
 require_once __DIR__ . '/../../../config/db.php';
 require_once __DIR__ . '/../../../helpers/crypto.php';
 require_once __DIR__ . '/../../../helpers/CertificateManager.php';
+require_once __DIR__ . '/../../../lib/account_holds.php';
+require_once __DIR__ . '/../../../lib/held_balance_schema.php';
+require_once __DIR__ . '/../../../lib/audit_log.php';
 
 $input = json_decode(file_get_contents('php://input'), true);
 
@@ -109,10 +110,16 @@ if (!$holdReference || !$amount) {
 }
 
 try {
+    // Account holds need the held-balance schema; the first request after
+    // the deploy applies it (Backend/lib/held_balance_schema.php). Voucher
+    // debits do not need it and keep working if it cannot be applied.
+    $heldBalanceReady = held_balance_ready($pdo);
+
     $pdo->beginTransaction();
 
     // ============================================================
     // BRANCH 1: Try to find as ACCOUNT hold first
+    // (in_held_balance is read by account_hold_debit(), only on this path)
     // ============================================================
     $stmt = $pdo->prepare("
         SELECT id, account_id, amount, status
@@ -127,32 +134,24 @@ try {
     if ($accountHold) {
         // ============================================================
         // ACCOUNT DEBIT PATH
-        // FIXED: hold.php's PLACE_HOLD already did
-        //   UPDATE accounts SET balance = balance - :amount
-        // at hold-placement time. That money is already gone from
-        // `balance`. This finalization step must ONLY flip the
-        // hold's status to DEBITED — it does not touch `balance`
-        // again. The previous version re-ran the same subtraction
-        // here, silently charging the account 2x per debit.
+        // hold.php's PLACE_HOLD leaves `balance` alone and adds the
+        // amount to `held_balance`. This is where the money actually
+        // leaves the account: balance and held_balance both go down by
+        // the hold amount. A hold placed before held_balance existed
+        // (in_held_balance = FALSE) was already taken out of balance,
+        // so for that one nothing moves here.
         // ============================================================
         error_log("ZURUBANK NOTIFY_DEBIT: Found ACCOUNT hold ID={$accountHold['id']}, account_id={$accountHold['account_id']}");
+
+        if (!$heldBalanceReady) {
+            throw new Exception(HELD_BALANCE_UNAVAILABLE);
+        }
 
         if (abs(floatval($accountHold['amount']) - floatval($amount)) > 0.01) {
             throw new Exception("Amount mismatch. Hold: {$accountHold['amount']}, Requested: $amount");
         }
 
-        // Read current balance for the response payload only —
-        // no mutation of `balance` here, it was already applied at
-        // hold time.
-        $stmt = $pdo->prepare("
-            SELECT balance FROM accounts WHERE account_id = :account_id
-        ");
-        $stmt->execute(['account_id' => $accountHold['account_id']]);
-        $currentAccount = $stmt->fetch(PDO::FETCH_ASSOC);
-
-        if (!$currentAccount) {
-            throw new Exception("Account not found during debit finalization: {$accountHold['account_id']}");
-        }
+        $currentAccount = account_hold_debit($pdo, $accountHold);
 
         // Finalize the hold
         $stmt = $pdo->prepare("
@@ -182,8 +181,7 @@ try {
         // database/migrations/2026_09_16_identity_swap_internal_accounts.sql)
         // - both legs together net it back to zero, so it only records
         // the flow rather than holding funds. The customer's own balance
-        // was already debited at hold-placement time (see the comment
-        // above); this does not touch it again.
+        // was debited just above; this does not touch it again.
         // ============================================================
         $isIdentitySwapDebit = stripos((string)($input['reason'] ?? ''), 'identity') !== false;
 
@@ -203,32 +201,21 @@ try {
             error_log("ZURUBANK NOTIFY_DEBIT: Identity-swap settlement leg recorded for hold_reference={$holdReference}, amount={$amount}, counterparty={$counterpartyBank}");
         }
 
-        // Record in audit
-        $ipAddress = $_SERVER['REMOTE_ADDR'] ?? $_SERVER['HTTP_X_FORWARDED_FOR'] ?? null;
-        $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? null;
-        
-        $stmt = $pdo->prepare("
-            INSERT INTO audit_logs 
-            (entity, entity_id, action, category, severity, 
-             old_value, new_value, performed_by, performed_at,
-             ip_address, user_agent)
-            VALUES 
-            ('financial_holds', :entity_id, 'DEBIT', 'financial', 'info',
-             :old_value, :new_value, :performed_by, NOW(),
-             :ip_address, :user_agent)
-        ");
-        $stmt->execute([
+        // Record in audit. Never able to undo the debit: see Backend/lib/audit_log.php.
+        audit_log_write($pdo, [
+            'entity' => 'financial_holds',
             'entity_id' => $accountHold['id'],
+            'action' => 'DEBIT',
             'performed_by' => $requester,
-            'old_value' => json_encode(['status' => 'HELD', 'amount' => $accountHold['amount']]),
-            'new_value' => json_encode(['status' => 'DEBITED', 'amount' => $amount, 'signature_verified' => $isValid]),
-            'ip_address' => $ipAddress,
-            'user_agent' => $userAgent
+            'old_value' => ['status' => 'HELD', 'amount' => $accountHold['amount']],
+            'new_value' => ['status' => 'DEBITED', 'amount' => $amount, 'signature_verified' => $isValid],
+            'ip_address' => $_SERVER['REMOTE_ADDR'] ?? $_SERVER['HTTP_X_FORWARDED_FOR'] ?? null,
+            'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
         ]);
 
         $pdo->commit();
 
-        error_log("ZURUBANK NOTIFY_DEBIT: ACCOUNT debit finalized (no balance mutation here) - account_id={$accountHold['account_id']}, amount={$amount}, balance={$currentAccount['balance']}");
+        error_log("ZURUBANK NOTIFY_DEBIT: ACCOUNT debit finalized - account_id={$accountHold['account_id']}, amount={$amount}, balance={$currentAccount['balance']}, held={$currentAccount['held_balance']}");
 
         $responsePayload = [
             "success" => true,
@@ -238,8 +225,9 @@ try {
             "hold_reference" => $holdReference,
             "amount" => (float)$amount,
             "account_id" => $accountHold['account_id'],
-            "total_balance" => floatval($currentAccount['balance']),
-            "available_balance" => floatval($currentAccount['balance']),
+            "total_balance" => $currentAccount['balance'],
+            "available_balance" => $currentAccount['available_balance'],
+            "held_balance" => $currentAccount['held_balance'],
             "requester" => $requester,
             "signature_verified" => $isValid,
             "verification_method" => "certificate",
@@ -447,27 +435,16 @@ $stmt->execute([
     'description' => (string)"Voucher {$voucher['voucher_number']} settlement (authorized by {$requester})"
 ]);
 
-    // Log in audit with signature info
-    $ipAddress = $_SERVER['REMOTE_ADDR'] ?? $_SERVER['HTTP_X_FORWARDED_FOR'] ?? null;
-    $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? null;
-    
-    $stmt = $pdo->prepare("
-        INSERT INTO audit_logs 
-        (entity, entity_id, action, category, severity, 
-         old_value, new_value, performed_by, performed_at,
-         ip_address, user_agent)
-        VALUES 
-        ('instant_money_vouchers', :entity_id, 'DEBIT', 'financial', 'info',
-         :old_value, :new_value, :performed_by, NOW(),
-         :ip_address, :user_agent)
-    ");
-    $stmt->execute([
+    // Log in audit with signature info. Never able to undo the debit.
+    audit_log_write($pdo, [
+        'entity' => 'instant_money_vouchers',
         'entity_id' => $voucher['voucher_id'],
+        'action' => 'DEBIT',
         'performed_by' => $requester,
-        'old_value' => json_encode(['status' => $voucher['status'], 'amount' => $voucher['amount']]),
-        'new_value' => json_encode(['status' => 'redeemed', 'amount' => $amount, 'signature_verified' => $isValid]),
-        'ip_address' => $ipAddress,
-        'user_agent' => $userAgent
+        'old_value' => ['status' => $voucher['status'], 'amount' => $voucher['amount']],
+        'new_value' => ['status' => 'redeemed', 'amount' => $amount, 'signature_verified' => $isValid],
+        'ip_address' => $_SERVER['REMOTE_ADDR'] ?? $_SERVER['HTTP_X_FORWARDED_FOR'] ?? null,
+        'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
     ]);
 
     $pdo->commit();
