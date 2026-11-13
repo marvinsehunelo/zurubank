@@ -112,6 +112,9 @@ CREATE VIEW v_stale_voucher_holds AS
     SELECT * FROM instant_money_vouchers
     WHERE status = 'hold' AND hold_expires_at IS NOT NULL AND hold_expires_at < NOW();
 
+-- performed_by is text here, NOT the INTEGER NOT NULL of backup.sql:
+-- notify_debit.php writes the requester's name into it. Test B12 in
+-- tests/hold_flow_pg_test.php runs a debit against the backup.sql shape.
 CREATE TABLE audit_logs (
     id           BIGSERIAL PRIMARY KEY,
     entity       VARCHAR(100),
@@ -134,3 +137,28 @@ CREATE TABLE swap_internal_accounts (
     balance      NUMERIC(15,2) DEFAULT 0.00
 );
 INSERT INTO swap_internal_accounts (account_code) VALUES ('IDENTITY-SETTLEMENT');
+
+-- For Backend/api/v1/transaction/reverse.php, columns as in backup.sql
+-- (trimmed to the ones that file reads before it moves money).
+CREATE TABLE transactions (
+    transaction_id SERIAL PRIMARY KEY,
+    user_id        INTEGER DEFAULT 0,
+    account_id     INTEGER DEFAULT 0 NOT NULL,
+    from_account   VARCHAR(255),
+    to_account     VARCHAR(255),
+    type           VARCHAR(50) NOT NULL,
+    amount         NUMERIC(15,2) DEFAULT 0.00 NOT NULL,
+    reference      VARCHAR(255),
+    description    TEXT,
+    status         VARCHAR(50) DEFAULT 'pending' NOT NULL,
+    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    trace_number   VARCHAR(255)
+);
+
+CREATE TABLE transaction_reversals (
+    id             SERIAL PRIMARY KEY,
+    original_trace VARCHAR(100) NOT NULL,
+    reversal_trace VARCHAR(100) NOT NULL,
+    reason         TEXT,
+    reversed_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);

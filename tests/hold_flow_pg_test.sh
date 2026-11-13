@@ -11,9 +11,10 @@
 #
 # Everything is made up and lives in a temp directory that is deleted at
 # the end: its own database cluster (never an existing one), test-only
-# certificates generated on the spot, and PHP's built-in server on a
-# loopback port. It refuses to run unless it can create that cluster.
-# Needs: PostgreSQL 16 binaries (initdb, pg_ctl), php with pdo_pgsql, openssl.
+# certificates generated on the spot, and two PHP built-in servers on
+# loopback ports. It refuses to run unless it can create that cluster.
+# Needs: PostgreSQL 16 binaries (initdb, pg_ctl), php with pdo_pgsql and
+# curl, openssl. See docs/HELD_BALANCE.md.
 
 set -euo pipefail
 
@@ -38,6 +39,7 @@ fi
 
 cleanup() {
     [ -n "${WEBPID:-}" ] && kill "$WEBPID" 2>/dev/null || true
+    [ -n "${WEBPID2:-}" ] && kill "$WEBPID2" 2>/dev/null || true
     as_pg "$PGBIN/pg_ctl" -D "$WORK/pgdata" -m immediate stop >/dev/null 2>&1 || true
     rm -rf "$WORK"
 }
@@ -73,17 +75,30 @@ export VOUCHMORPH_PRIVATE_KEY_CONTENT="$(cat "$C/VOUCHMORPH.key")"
 export VOUCHMORPH_CERT_CONTENT="$(cat "$C/VOUCHMORPH.crt")"
 export ZURUBANK_API_KEY="test-only-not-a-real-key"
 
-echo "== PHP built-in server on 127.0.0.1:$WEBPORT"
-( cd "$ROOT" && exec php -d error_log="$WORK/php-error.log" -d log_errors=1 -d display_errors=0 \
-    -S "127.0.0.1:$WEBPORT" -t . router.php >"$WORK/php-server.log" 2>&1 ) &
-WEBPID=$!
-for _ in $(seq 1 50); do
-    curl -s -o /dev/null "http://127.0.0.1:$WEBPORT/" && break
-    sleep 0.1
+# Two separate server processes: the check for two holds at the same moment
+# sends one request to each, so both really run at once (one built-in server
+# process runs one request at a time, even with PHP_CLI_SERVER_WORKERS).
+WEBPORT2=$(( WEBPORT + 1 ))
+start_web() {
+    ( cd "$ROOT" && exec php -d error_log="$WORK/php-error.log" -d log_errors=1 -d display_errors=0 \
+        -S "127.0.0.1:$1" -t . router.php >"$WORK/php-server-$1.log" 2>&1 ) &
+}
+echo "== PHP built-in servers on 127.0.0.1:$WEBPORT and :$WEBPORT2"
+start_web "$WEBPORT";  WEBPID=$!
+start_web "$WEBPORT2"; WEBPID2=$!
+for port in "$WEBPORT" "$WEBPORT2"; do
+    for _ in $(seq 1 50); do
+        curl -s -o /dev/null "http://127.0.0.1:$port/" && break
+        sleep 0.1
+    done
 done
 
 export HOLD_TEST_BASE_URL="http://127.0.0.1:$WEBPORT"
-export HOLD_TEST_PSQL="$PGBIN/psql -X -q -h 127.0.0.1 -p $PGPORT_T -U postgres -d $DB"
+export HOLD_TEST_BASE_URL_2="http://127.0.0.1:$WEBPORT2"
+export HOLD_TEST_PSQL_BIN="$PGBIN/psql"
+export HOLD_TEST_PGPORT="$PGPORT_T"
+export HOLD_TEST_DB="$DB"
+export HOLD_TEST_THROWAWAY=1
 export HOLD_TEST_ERROR_LOG="$WORK/php-error.log"
 
 set +e
