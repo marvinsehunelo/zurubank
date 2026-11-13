@@ -5,6 +5,8 @@ header('Content-Type: application/json');
 require_once __DIR__ . '/../auth.php';
 require_once __DIR__ . '/../../../helpers/crypto.php';
 require_once __DIR__ . '/../../../helpers/CertificateManager.php';
+require_once __DIR__ . '/../../../lib/account_holds.php';
+require_once __DIR__ . '/../../../lib/audit_log.php';
 
 // Validate API key first
 $client = validate_api_key();
@@ -106,111 +108,88 @@ try {
     $pdo->beginTransaction();
     
     // Lock account for update
-    $lockStmt = $pdo->prepare("SELECT balance FROM accounts WHERE account_id = ? FOR UPDATE");
+    // SELECT *: before the held-balance migration there is no held_balance (and nothing held).
+    $lockStmt = $pdo->prepare("SELECT * FROM accounts WHERE account_id = ? FOR UPDATE");
     $lockStmt->execute([$original['account_id']]);
-    $currentBalance = $lockStmt->fetchColumn();
+    $lockedAccount = $lockStmt->fetch(PDO::FETCH_ASSOC);
+    $currentBalance = $lockedAccount['balance'];
     
     // Reverse the amount (credit back or debit based on original type)
     $newBalance = $currentBalance;
     
     if ($original['type'] === 'deposit' || $original['type'] === 'credit') {
+        // Taking a credit back must not spend money that is on hold: held
+        // money stays in balance but belongs to the hold (see
+        // Backend/lib/account_holds.php). Refuse plainly instead of letting
+        // the database CHECK fail the request with a 500.
+        $heldNow = $lockedAccount['held_balance'] ?? 0;
+        $available = hold_available($lockedAccount['balance'], $heldNow);
+        if ((float)$heldNow > 0 && $available < hold_money($original['amount'])) {
+            $pdo->rollBack();
+            http_response_code(409);
+            echo json_encode([
+                'status' => 'error',
+                'message' => 'Reversal refused: ' . HOLD_SPEND_REFUSED,
+                'original_trace' => $data['original_trace'],
+                'amount' => (float)$original['amount'],
+                'available_balance' => $available,
+                'held_balance' => hold_money($heldNow),
+                'timestamp' => time()
+            ]);
+            exit;
+        }
         // For deposits/credits, we need to debit the account
-        $updateStmt = $pdo->prepare("UPDATE accounts SET balance = balance - ?, updated_at = NOW() WHERE account_id = ?");
+        $updateStmt = $pdo->prepare("UPDATE accounts SET balance = balance - ? WHERE account_id = ?");
         $updateStmt->execute([$original['amount'], $original['account_id']]);
         $newBalance = $currentBalance - $original['amount'];
         error_log("ZURUBANK REVERSE: Debited {$original['amount']} from account {$original['account_id']}");
     } else {
         // For debits/withdrawals, credit back
-        $updateStmt = $pdo->prepare("UPDATE accounts SET balance = balance + ?, updated_at = NOW() WHERE account_id = ?");
+        $updateStmt = $pdo->prepare("UPDATE accounts SET balance = balance + ? WHERE account_id = ?");
         $updateStmt->execute([$original['amount'], $original['account_id']]);
         $newBalance = $currentBalance + $original['amount'];
         error_log("ZURUBANK REVERSE: Credited {$original['amount']} to account {$original['account_id']}");
     }
     
-    // Create reversal record
+    // Only columns the live schema has (backup.sql): transaction_reversals is
+    // (original_trace, reversal_trace, reason, reversed_at), and accounts and
+    // transactions have no updated_at or reversal columns. Who reversed it and
+    // how it was verified go into the transaction's description and the audit row.
     $reversal_trace = 'REV-' . time() . '-' . rand(1000, 9999);
     $revStmt = $pdo->prepare("
-        INSERT INTO transaction_reversals (
-            original_trace, 
-            reversal_trace, 
-            reason, 
-            reversed_by, 
-            reversed_by_cert_verified,
-            verification_method,
-            amount,
-            reversed_at,
-            created_at
-        ) VALUES (
-            :original_trace, 
-            :reversal_trace, 
-            :reason, 
-            :reversed_by, 
-            :cert_verified,
-            :verification_method,
-            :amount,
-            NOW(),
-            NOW()
-        )
+        INSERT INTO transaction_reversals (original_trace, reversal_trace, reason, reversed_at)
+        VALUES (:original_trace, :reversal_trace, :reason, NOW())
     ");
     $revStmt->execute([
         'original_trace' => $data['original_trace'],
         'reversal_trace' => $reversal_trace,
         'reason' => $data['reason'],
-        'reversed_by' => $requester,
-        'cert_verified' => $isValid ? 1 : 0,
-        'verification_method' => 'certificate',
-        'amount' => $original['amount']
     ]);
     
     // Update original transaction status
     $updateTransStmt = $pdo->prepare("
         UPDATE transactions 
         SET status = 'reversed', 
-            reversed_at = NOW(),
-            reversed_by = :reversed_by,
-            reversal_reason = :reason,
-            reversal_trace = :reversal_trace,
-            updated_at = NOW()
+            description = COALESCE(description, '') || :note
         WHERE trace_number = :trace_number OR reference = :trace_number
     ");
     $updateTransStmt->execute([
         'trace_number' => $data['original_trace'],
-        'reversed_by' => $requester,
-        'reason' => $data['reason'],
-        'reversal_trace' => $reversal_trace
+        'note' => ' | Reversed ' . date('Y-m-d H:i:s') . ' by ' . $requester . ' (' . $reversal_trace . '): '
+            . substr((string)$data['reason'], 0, 200),
     ]);
     
-    // Create audit log entry
-    $auditStmt = $pdo->prepare("
-        INSERT INTO audit_logs (
-            entity_type,
-            entity_id,
-            action,
-            old_value,
-            new_value,
-            performed_by,
-            signature_verified,
-            verification_method,
-            created_at
-        ) VALUES (
-            'transaction',
-            :trace,
-            'REVERSE',
-            :old_value,
-            :new_value,
-            :performed_by,
-            :sig_verified,
-            :verification_method,
-            NOW()
-        )
-    ");
-    $auditStmt->execute([
-        'trace' => $data['original_trace'],
-        'old_value' => json_encode(['status' => $original['status'], 'balance' => $currentBalance]),
-        'new_value' => json_encode(['status' => 'reversed', 'balance' => $newBalance]),
+    // Audit row; never able to undo the reversal (Backend/lib/audit_log.php).
+    audit_log_write($pdo, [
+        'entity' => 'transactions',
+        'entity_id' => $original['transaction_id'],
+        'action' => 'REVERSE',
         'performed_by' => $requester,
-        'sig_verified' => $isValid ? 1 : 0,
-        'verification_method' => 'certificate'
+        'old_value' => ['status' => $original['status'], 'balance' => $currentBalance, 'trace' => $data['original_trace']],
+        'new_value' => ['status' => 'reversed', 'balance' => $newBalance, 'reversal_trace' => $reversal_trace,
+                        'signature_verified' => $isValid, 'verification_method' => 'certificate'],
+        'ip_address' => $_SERVER['REMOTE_ADDR'] ?? null,
+        'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
     ]);
     
     $pdo->commit();
@@ -245,10 +224,11 @@ try {
     error_log("ZURUBANK REVERSE Trace: " . $e->getTraceAsString());
     error_log("ZURUBANK REVERSE Input: " . json_encode($data ?? []));
     
-    http_response_code(500);
+    // The held-money CHECK is a refusal, not a server fault.
+    http_response_code(hold_is_held_money_refusal($e) ? 409 : 500);
     echo json_encode([
         'status' => 'error',
-        'message' => 'Reversal failed: ' . $e->getMessage(),
+        'message' => 'Reversal failed: ' . hold_refusal_message($e),
         'timestamp' => time()
     ]);
 }

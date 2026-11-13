@@ -61,7 +61,6 @@ function sign_payload($payload, $privateKey = null)
         }
         
         error_log("ZURUBANK: Private key from CertificateManager length: " . strlen($privateKeyString));
-        error_log("ZURUBANK: Private key first 50 chars: " . substr($privateKeyString, 0, 50));
         
         // The key should already be in the correct format from CertificateManager
         $privateKey = openssl_pkey_get_private($privateKeyString);

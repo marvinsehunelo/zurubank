@@ -2,6 +2,7 @@
 declare(strict_types=1);
 
 require_once __DIR__ . "/../config/db.php";
+require_once __DIR__ . '/../lib/account_holds.php';
 header("Content-Type: application/json; charset=utf-8");
 
 // LOGGING
@@ -136,5 +137,5 @@ try {
 } catch (Exception $e) {
     if ($pdo->inTransaction()) $pdo->rollBack();
     file_put_contents($debugLog, date('Y-m-d H:i:s') . " | ERROR: " . $e->getMessage() . PHP_EOL, FILE_APPEND);
-    jsonResponse('error', $e->getMessage());
+    jsonResponse('error', hold_refusal_message($e));
 }

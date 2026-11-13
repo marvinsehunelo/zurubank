@@ -1,6 +1,7 @@
 <?php
 header("Content-Type: application/json");
 require_once __DIR__ . "/../config/db.php";
+require_once __DIR__ . '/../lib/account_holds.php';
 
 try {
     // ------------------ TOKEN HANDLING ------------------
@@ -54,7 +55,8 @@ try {
     $tgtAcc = $stmt->fetch(PDO::FETCH_ASSOC);
     if (!$tgtAcc) throw new Exception("Target account not found");
 
-    if ($srcAcc['balance'] < $amount) throw new Exception("Insufficient funds in source account");
+    // held money (held_balance) is in balance but cannot be spent
+    if (($srcAcc['balance'] - ($srcAcc['held_balance'] ?? 0)) < $amount) throw new Exception("Insufficient funds in source account");
 
     // ------------------ UPDATE BALANCES ------------------
     $stmt = $pdo->prepare("UPDATE accounts SET balance = balance - ? WHERE account_id = ?");
@@ -83,6 +85,6 @@ try {
     if ($pdo->inTransaction()) $pdo->rollBack();
     echo json_encode([
         "status" => "error",
-        "message" => $e->getMessage()
+        "message" => hold_refusal_message($e)
     ]);
 }

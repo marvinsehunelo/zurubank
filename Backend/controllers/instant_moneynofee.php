@@ -2,6 +2,7 @@
 if (session_status() === PHP_SESSION_NONE) session_start();
 
 require_once __DIR__ . '/../config/db.php';
+require_once __DIR__ . '/../lib/account_holds.php';
 header('Content-Type: application/json');
 
 // Ensure all errors are logged but not output
@@ -43,11 +44,11 @@ try {
             $sender_phone = $sender['phone'];
 
             // Check balance
-            $stmt = $pdo->prepare("SELECT balance FROM accounts WHERE account_id=? AND user_id=?");
+            $stmt = $pdo->prepare("SELECT * FROM accounts WHERE account_id=? AND user_id=?"); // held_balance may not exist yet
             $stmt->execute([$from_account_id, $user_id]);
             $acc = $stmt->fetch(PDO::FETCH_ASSOC);
             if (!$acc) throw new Exception("Account not found");
-            if ($acc['balance'] < $amount) throw new Exception("Insufficient funds");
+            if (($acc['balance'] - ($acc['held_balance'] ?? 0)) < $amount) throw new Exception("Insufficient funds");
 
             $pdo->beginTransaction();
 
@@ -156,5 +157,5 @@ try {
 
 } catch (Exception $e) {
     if ($pdo->inTransaction()) $pdo->rollBack();
-    jsonResponse(false, $e->getMessage());
+    jsonResponse(false, hold_refusal_message($e));
 }

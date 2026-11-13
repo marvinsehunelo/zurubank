@@ -38,6 +38,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 
 require_once __DIR__ . '/../../../helpers/CertificateManager.php';
 require_once __DIR__ . '/../../../helpers/crypto.php';
+require_once __DIR__ . '/../../../lib/held_balance_schema.php';
 
 /** One place to answer, so every exit has the same shape. */
 function respond(int $status, array $body): void
@@ -296,11 +297,19 @@ try {
     // ACCOUNT
     // ------------------------------------------------------------
     if ($balance === null && !$isVoucher) {
+        // held_balance is needed to tell what can be spent; the first
+        // request after the deploy applies it (lib/held_balance_schema.php).
+        if (!held_balance_ready($pdo)) {
+            respond(503, [
+                'status'  => 'error',
+                'message' => HELD_BALANCE_UNAVAILABLE,
+            ]);
+        }
         $stmt = $pdo->prepare("
             SELECT
                 account_id, user_id, account_number, account_type,
-                balance, available_balance, held_amount, currency,
-                status, created_at, updated_at
+                balance, held_balance, currency,
+                status, created_at
             FROM accounts
             WHERE account_number = :account_number
             LIMIT 1
@@ -317,8 +326,10 @@ try {
             $accountType      = $account['account_type'] ?? 'ACCOUNT';
             $accountId        = (int)$account['account_id'];
             $userId           = (int)($account['user_id'] ?? 0);
-            $heldAmount       = (float)($account['held_amount'] ?? 0);
-            $availableBalance = (float)($account['available_balance'] ?? ($balance - $heldAmount));
+            // balance is everything the customer has; held_balance is the
+            // part set aside by live holds; the rest can be spent.
+            $heldAmount       = (float)$account['held_balance'];
+            $availableBalance = round($balance - $heldAmount, 4);
             error_log("[ZURUBANK Balance] Found account: {$account_id}, balance: {$balance}");
         }
     }
@@ -353,6 +364,7 @@ try {
             'balance'           => $balance,
             'available_balance' => $availableBalance ?? $balance,
             'held_amount'       => $heldAmount ?? 0,
+            'held_balance'      => $heldAmount ?? 0,
             'currency'          => $currency,
             'status'            => $accountStatus ?? 'active',
             'is_voucher'        => $isVoucher,

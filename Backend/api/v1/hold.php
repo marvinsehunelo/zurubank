@@ -8,14 +8,18 @@
 require_once __DIR__ . '/../../config/db.php';
 require_once __DIR__ . '/../../helpers/crypto.php';
 require_once __DIR__ . '/../../helpers/CertificateManager.php';
+require_once __DIR__ . '/../../lib/account_holds.php';
+require_once __DIR__ . '/../../lib/held_balance_schema.php';
+require_once __DIR__ . '/../../lib/request_log.php';
 
 header('Content-Type: application/json');
 
 try {
     $input = json_decode(file_get_contents('php://input'), true);
     
-    error_log("=== ZURUBANK hold.php received ===");
-    error_log(json_encode($input));
+    // Only the shape of the body: it carries a certificate and a signature,
+    // and for a voucher or wallet a customer's PIN.
+    error_log("=== ZURUBANK hold.php received === " . request_shape_for_log($input));
 
     // ============================================================
     // CERTIFICATE-BASED VERIFICATION (REQUIRED)
@@ -95,7 +99,7 @@ try {
     if (($assetType === 'VOUCHER' || $assetType === 'CASHOUT-VOUCHER') && empty($voucherNumber)) {
         if (!empty($accountNumber)) {
             $voucherNumber = trim($accountNumber);
-            error_log("ZURUBANK HOLD: Using source_identifier as voucher_number: $voucherNumber");
+            error_log("ZURUBANK HOLD: Using source_identifier as voucher_number: " . masked_for_log($voucherNumber));
         }
     }
     
@@ -105,7 +109,7 @@ try {
     if (empty($voucherNumber) && !empty($input['reference'])) {
         if (preg_match('/HOLD_(\d+)_/', $input['reference'], $matches)) {
             $voucherNumber = $matches[1];
-            error_log("ZURUBANK HOLD: Extracted voucher_number from reference: $voucherNumber");
+            error_log("ZURUBANK HOLD: Extracted voucher_number from reference: " . masked_for_log($voucherNumber));
         }
     }
     
@@ -117,7 +121,7 @@ try {
         foreach ($input as $key => $value) {
             if (is_string($value) && preg_match('/^\d+$/', $value) && strlen($value) >= 6) {
                 $voucherNumber = trim($value);
-                error_log("ZURUBANK HOLD: Auto-detected voucher_number from field '$key': $voucherNumber");
+                error_log("ZURUBANK HOLD: Auto-detected voucher_number from field '$key': " . masked_for_log($voucherNumber));
                 break;
             }
         }
@@ -204,7 +208,7 @@ try {
         throw new Exception("Hold reference is required");
     }
     
-    error_log("ZURUBANK HOLD: Action: $action, AssetType: $assetType, HoldRef: $holdReference, Amount: $amount, VoucherNum: $voucherNumber");
+    error_log("ZURUBANK HOLD: Action: $action, AssetType: $assetType, HoldRef: $holdReference, Amount: $amount, VoucherNum: " . masked_for_log($voucherNumber));
 
     // RELEASE_HOLD releases by hold_reference lookup - it doesn't need a
     // fresh amount supplied by the caller (there's nothing to supply; the
@@ -216,6 +220,11 @@ try {
     if ($amount <= 0 && $action !== 'RELEASE_HOLD') {
         throw new Exception("Valid amount required");
     }
+
+    // Account (and card) holds need the held-balance schema; the first
+    // request after the deploy applies it (Backend/lib/held_balance_schema.php).
+    // Voucher and wallet holds do not need it and keep working without it.
+    $heldBalanceReady = ($assetType === 'ACCOUNT') ? held_balance_ready($pdo) : true;
 
     // Start transaction
     $pdo->beginTransaction();
@@ -264,16 +273,16 @@ try {
         }
 
         if (!$voucher) {
-            error_log("ZURUBANK HOLD: Voucher not found: $voucherNumber");
+            error_log("ZURUBANK HOLD: Voucher not found: " . masked_for_log($voucherNumber));
             throw new Exception("Voucher not found: $voucherNumber");
         }
 
         if ($voucherPin && isset($voucher['voucher_pin'])) {
             if ($voucher['voucher_pin'] !== $voucherPin) {
-                error_log("ZURUBANK HOLD: Invalid PIN for voucher $voucherNumber");
+                error_log("ZURUBANK HOLD: Invalid PIN for voucher " . masked_for_log($voucherNumber));
                 throw new Exception("Invalid voucher PIN");
             }
-            error_log("ZURUBANK HOLD: PIN verified for voucher $voucherNumber");
+            error_log("ZURUBANK HOLD: PIN verified for voucher " . masked_for_log($voucherNumber));
         }
 
         if (in_array($action, ['HOLD', 'PLACE', 'PLACE_HOLD'])) {
@@ -348,6 +357,9 @@ try {
     // ACCOUNT HANDLING (also handles resolved CARD requests)
     // ============================================================
     } elseif ($assetType === 'ACCOUNT') {
+        if (!$heldBalanceReady) {
+            throw new Exception(HELD_BALANCE_UNAVAILABLE);
+        }
         if (!$accountNumber) {
             throw new Exception("Account number required");
         }
@@ -357,6 +369,7 @@ try {
                 account_id,
                 account_number,
                 balance,
+                held_balance,
                 status,
                 currency,
                 user_id
@@ -392,48 +405,30 @@ try {
                     debited_at TIMESTAMP,
                     released_at TIMESTAMP,
                     created_at TIMESTAMP DEFAULT NOW(),
-                    updated_at TIMESTAMP DEFAULT NOW()
+                    updated_at TIMESTAMP DEFAULT NOW(),
+                    in_held_balance BOOLEAN NOT NULL DEFAULT FALSE
                 )
             ");
 
-            $balance = floatval($account['balance'] ?? 0);
-            
-            error_log("ZURUBANK HOLD: Account balance: $balance, Requested: $amount");
-            
-            if ($balance < $amount) {
-                throw new Exception(
-                    "Insufficient balance. "
-                    . "Available: $balance, Requested: $amount"
-                );
-            }
+            // The money stays in `balance`. Placing a hold only adds to
+            // `held_balance`; what the customer can spend is balance - held.
+            // hold_delta_place() refuses an amount above what is available.
+            $before = hold_figures($account);
+            error_log("ZURUBANK HOLD: Account balance: {$before['balance']}, held: {$before['held_balance']}, available: {$before['available_balance']}, Requested: $amount");
+            hold_delta_place($before['balance'], $before['held_balance'], $amount);
 
-            // Insert hold record
+            // Insert hold record. in_held_balance = TRUE marks it as counted
+            // inside accounts.held_balance (see Backend/lib/account_holds.php).
             $stmt = $pdo->prepare("
                 INSERT INTO financial_holds 
-                    (account_id, amount, hold_reference, status, requester, signature_verified, expires_at)
-                VALUES (?, ?, ?, 'HELD', ?, ?, NOW() + INTERVAL '24 hours')
+                    (account_id, amount, hold_reference, status, requester, signature_verified, expires_at, in_held_balance)
+                VALUES (?, ?, ?, 'HELD', ?, ?, NOW() + INTERVAL '24 hours', TRUE)
                 RETURNING id
             ");
             $stmt->execute([$account['account_id'], $amount, $holdReference, $requester, $isValid ? 1 : 0]);
             $holdId = $stmt->fetchColumn();
 
-            // Update account balance - reduce balance directly
-            $stmt = $pdo->prepare("
-                UPDATE accounts 
-                SET balance = balance - :amount
-                WHERE account_id = :account_id 
-                AND balance >= :amount
-                RETURNING balance
-            ");
-            $stmt->execute([
-                'amount' => $amount,
-                'account_id' => $account['account_id']
-            ]);
-            $updated = $stmt->fetch(PDO::FETCH_ASSOC);
-
-            if (!$updated) {
-                throw new Exception("Failed to reserve funds");
-            }
+            $updated = account_hold_place($pdo, $account['account_id'], $amount);
             
             $assetId = $account['account_id'];
             $holdPlaced = true;
@@ -447,13 +442,15 @@ try {
                 'account_number' => $accountNumber,
                 'amount' => $amount,
                 'currency' => $account['currency'] ?? 'BWP',
-                'total_balance' => floatval($updated['balance']),
+                'total_balance' => $updated['balance'],
+                'held_balance' => $updated['held_balance'],
+                'available_balance' => $updated['available_balance'],
                 'hold_id' => $holdId
             ];
             
         } elseif ($action === 'DEBIT' || $action === 'DEBIT_HOLD' || $action === 'DEBIT_FUNDS') {
             $stmt = $pdo->prepare("
-                SELECT id, account_id, amount, status
+                SELECT id, account_id, amount, status, in_held_balance
                 FROM financial_holds
                 WHERE hold_reference = :hold_reference 
                 AND status = 'HELD'
@@ -471,26 +468,15 @@ try {
                 throw new Exception("No active hold found");
             }
 
-            if (floatval($hold['amount']) !== $amount) {
+            if (abs(floatval($hold['amount']) - $amount) > 0.01) {
                 throw new Exception("Hold amount mismatch");
             }
 
-            $stmt = $pdo->prepare("
-                UPDATE accounts 
-                SET balance = balance - :amount
-                WHERE account_id = :account_id 
-                AND balance >= :amount
-                RETURNING balance
-            ");
-            $stmt->execute([
-                'amount' => $amount,
-                'account_id' => $account['account_id']
-            ]);
-            $updated = $stmt->fetch(PDO::FETCH_ASSOC);
-
-            if (!$updated) {
-                throw new Exception("Insufficient balance for debit");
-            }
+            // The held amount leaves the account: balance and held_balance
+            // both go down by it, once. (This branch used to subtract from
+            // balance a second time, on top of the subtraction made when
+            // the hold was placed.) Same code as settlement/notify_debit.php.
+            $updated = account_hold_debit($pdo, $hold);
 
             $stmt = $pdo->prepare("
                 UPDATE financial_holds SET status = 'DEBITED', debited_at = NOW()
@@ -505,12 +491,14 @@ try {
                 'asset_type' => 'ACCOUNT',
                 'asset_id' => $account['account_id'],
                 'amount' => $amount,
-                'total_balance' => floatval($updated['balance'])
+                'total_balance' => $updated['balance'],
+                'held_balance' => $updated['held_balance'],
+                'available_balance' => $updated['available_balance']
             ];
             
         } elseif (in_array($action, ['RELEASE', 'RELEASE_HOLD', 'UNHOLD'])) {
             $stmt = $pdo->prepare("
-                SELECT id, account_id, amount, status
+                SELECT id, account_id, amount, status, in_held_balance
                 FROM financial_holds
                 WHERE hold_reference = :hold_reference 
                 AND status = 'HELD'
@@ -532,39 +520,21 @@ try {
 
             // ============================================================
             // PARTIAL RELEASE: if the caller supplies a positive amount
-            // strictly less than the full held amount, release only that
-            // much back to available balance. The difference stays
-            // captured - it was already removed from balance when the
-            // hold was placed, and is simply never returned. This is
-            // standard authorization/capture behavior (the same way a
-            // card issuer releases the unused portion of a hotel
-            // pre-auth while keeping the actual charge) - not a special
-            // case invented for this system.
+            // strictly less than the full held amount, only that much is
+            // given back to the customer and the difference is captured
+            // (authorization/capture, like a hotel pre-auth). The whole
+            // hold comes off held_balance; the captured part also comes
+            // off balance.
             //
-            // If $amount is 0/absent, or >= the full held amount, this
-            // behaves exactly as before: release the FULL amount. Every
-            // existing caller that never sends an amount on release is
-            // completely unaffected.
+            // If $amount is 0/absent, or >= the full held amount, the FULL
+            // amount is released: held_balance goes down, balance does not
+            // move. Callers that never send an amount on release are
+            // unaffected.
             // ============================================================
-            $releaseAmount = ($amount > 0 && $amount < $fullHeldAmount) ? $amount : $fullHeldAmount;
-            $isPartial = $releaseAmount < $fullHeldAmount;
-            $capturedAmount = round($fullHeldAmount - $releaseAmount, 2);
-
-            $stmt = $pdo->prepare("
-                UPDATE accounts 
-                SET balance = balance + :amount
-                WHERE account_id = :account_id 
-                RETURNING balance
-            ");
-            $stmt->execute([
-                'amount' => $releaseAmount,
-                'account_id' => $account['account_id']
-            ]);
-            $updated = $stmt->fetch(PDO::FETCH_ASSOC);
-
-            if (!$updated) {
-                throw new Exception("Failed to release hold");
-            }
+            $updated = account_hold_release($pdo, $hold, $amount);
+            $releaseAmount = $updated['released'];
+            $isPartial = $updated['is_partial'];
+            $capturedAmount = round($updated['captured'], 2);
 
             // ============================================================
             // FIX: Ambiguous-parameter crash on release.
@@ -608,7 +578,7 @@ try {
                 'status' => 'SUCCESS',
                 'hold_placed' => false,
                 'message' => $isPartial
-                    ? "Hold partially released: {$releaseAmount} returned to balance, {$capturedAmount} captured"
+                    ? "Hold partially released: {$releaseAmount} made available again, {$capturedAmount} captured"
                     : 'Hold released',
                 'hold_reference' => $holdReference,
                 'asset_type' => 'ACCOUNT',
@@ -617,7 +587,9 @@ try {
                 'captured_amount' => $capturedAmount,
                 'full_held_amount' => $fullHeldAmount,
                 'is_partial' => $isPartial,
-                'total_balance' => floatval($updated['balance'])
+                'total_balance' => $updated['balance'],
+                'held_balance' => $updated['held_balance'],
+                'available_balance' => $updated['available_balance']
             ];
             
         } else {
@@ -657,6 +629,7 @@ try {
             $pdo->exec("
                 CREATE TABLE IF NOT EXISTS financial_holds (
                     id BIGSERIAL PRIMARY KEY,
+                    account_id BIGINT,
                     wallet_id BIGINT,
                     amount DECIMAL(20,4) NOT NULL,
                     hold_reference VARCHAR(100) UNIQUE NOT NULL,
@@ -667,7 +640,8 @@ try {
                     debited_at TIMESTAMP,
                     released_at TIMESTAMP,
                     created_at TIMESTAMP DEFAULT NOW(),
-                    updated_at TIMESTAMP DEFAULT NOW()
+                    updated_at TIMESTAMP DEFAULT NOW(),
+                    in_held_balance BOOLEAN NOT NULL DEFAULT FALSE
                 )
             ");
 
