@@ -4,6 +4,7 @@ declare(strict_types=1);
 header('Content-Type: application/json; charset=utf-8');
 
 require_once __DIR__ . '/../config/db.php';
+require_once __DIR__ . '/../lib/account_holds.php';
 require_once __DIR__ . '/../config/integration.php';
 
 $db = $pdo;
@@ -152,5 +153,5 @@ try {
 
 } catch (Exception $e) {
     if ($db->inTransaction()) $db->rollBack();
-    jsonResponse('error', $e->getMessage());
+    jsonResponse('error', hold_refusal_message($e));
 }

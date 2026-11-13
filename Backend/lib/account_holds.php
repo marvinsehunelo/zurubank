@@ -133,8 +133,10 @@ function account_hold_lock(PDO $pdo, $accountId): array
 }
 
 /**
- * Apply a change to the account row. The WHERE clause refuses any change
- * that would leave held_balance negative or balance below held_balance.
+ * Apply a change to the account row. The WHERE clause is the same rule as
+ * the accounts_held_within_balance CHECK: it refuses any change that would
+ * leave held_balance negative, or balance below a held_balance above zero.
+ * (An account with nothing held may still be overdrawn, as before.)
  */
 function account_hold_apply(PDO $pdo, $accountId, array $delta): array
 {
@@ -148,12 +150,13 @@ function account_hold_apply(PDO $pdo, $accountId, array $delta): array
                held_balance = held_balance + CAST(:h1 AS NUMERIC)
         WHERE  account_id = :id
           AND  held_balance + CAST(:h2 AS NUMERIC) >= 0
-          AND  balance + CAST(:b2 AS NUMERIC) >= held_balance + CAST(:h3 AS NUMERIC)
+          AND  (held_balance + CAST(:h3 AS NUMERIC) = 0
+                OR balance + CAST(:b2 AS NUMERIC) >= held_balance + CAST(:h4 AS NUMERIC))
         RETURNING balance, held_balance
     ");
     $b = hold_sql_amount($delta['balance']);
     $h = hold_sql_amount($delta['held']);
-    $stmt->execute([':b1' => $b, ':b2' => $b, ':h1' => $h, ':h2' => $h, ':h3' => $h, ':id' => $accountId]);
+    $stmt->execute([':b1' => $b, ':b2' => $b, ':h1' => $h, ':h2' => $h, ':h3' => $h, ':h4' => $h, ':id' => $accountId]);
     $row = $stmt->fetch(PDO::FETCH_ASSOC);
 
     if (!$row) {
@@ -197,4 +200,24 @@ function account_hold_release(PDO $pdo, array $hold, $requested = 0): array
     $figures = account_hold_apply($pdo, $hold['account_id'],
         hold_delta_release($hold['amount'], $requested, account_hold_is_in_held_balance($pdo, $hold)));
     return $figures + hold_release_split($hold['amount'], $requested);
+}
+
+// ---------------------------------------------------------------------
+// Refusals from the database
+// ---------------------------------------------------------------------
+
+const HOLD_SPEND_REFUSED = 'Part of this money is on hold and cannot be spent until the hold is released or settled';
+
+/** Was this error the accounts_held_within_balance CHECK refusing to spend held money? */
+function hold_is_held_money_refusal(Throwable $e): bool
+{
+    return $e instanceof PDOException
+        && (string)$e->getCode() === '23514'
+        && strpos($e->getMessage(), 'accounts_held_within_balance') !== false;
+}
+
+/** The message to show for an error: plain words for a held-money refusal, the error's own text otherwise. */
+function hold_refusal_message(Throwable $e): string
+{
+    return hold_is_held_money_refusal($e) ? HOLD_SPEND_REFUSED : $e->getMessage();
 }

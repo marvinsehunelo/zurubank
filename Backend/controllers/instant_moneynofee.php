@@ -2,6 +2,7 @@
 if (session_status() === PHP_SESSION_NONE) session_start();
 
 require_once __DIR__ . '/../config/db.php';
+require_once __DIR__ . '/../lib/account_holds.php';
 header('Content-Type: application/json');
 
 // Ensure all errors are logged but not output
@@ -156,5 +157,5 @@ try {
 
 } catch (Exception $e) {
     if ($pdo->inTransaction()) $pdo->rollBack();
-    jsonResponse(false, $e->getMessage());
+    jsonResponse(false, hold_refusal_message($e));
 }

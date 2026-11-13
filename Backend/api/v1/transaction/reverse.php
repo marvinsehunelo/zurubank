@@ -5,6 +5,7 @@ header('Content-Type: application/json');
 require_once __DIR__ . '/../auth.php';
 require_once __DIR__ . '/../../../helpers/crypto.php';
 require_once __DIR__ . '/../../../helpers/CertificateManager.php';
+require_once __DIR__ . '/../../../lib/account_holds.php';
 
 // Validate API key first
 $client = validate_api_key();
@@ -106,14 +107,34 @@ try {
     $pdo->beginTransaction();
     
     // Lock account for update
-    $lockStmt = $pdo->prepare("SELECT balance FROM accounts WHERE account_id = ? FOR UPDATE");
+    $lockStmt = $pdo->prepare("SELECT balance, held_balance FROM accounts WHERE account_id = ? FOR UPDATE");
     $lockStmt->execute([$original['account_id']]);
-    $currentBalance = $lockStmt->fetchColumn();
+    $lockedAccount = $lockStmt->fetch(PDO::FETCH_ASSOC);
+    $currentBalance = $lockedAccount['balance'];
     
     // Reverse the amount (credit back or debit based on original type)
     $newBalance = $currentBalance;
     
     if ($original['type'] === 'deposit' || $original['type'] === 'credit') {
+        // Taking a credit back must not spend money that is on hold: held
+        // money stays in balance but belongs to the hold (see
+        // Backend/lib/account_holds.php). Refuse plainly instead of letting
+        // the database CHECK fail the request with a 500.
+        $available = hold_available($lockedAccount['balance'], $lockedAccount['held_balance']);
+        if ((float)$lockedAccount['held_balance'] > 0 && $available < hold_money($original['amount'])) {
+            $pdo->rollBack();
+            http_response_code(409);
+            echo json_encode([
+                'status' => 'error',
+                'message' => 'Reversal refused: ' . HOLD_SPEND_REFUSED,
+                'original_trace' => $data['original_trace'],
+                'amount' => (float)$original['amount'],
+                'available_balance' => $available,
+                'held_balance' => hold_money($lockedAccount['held_balance']),
+                'timestamp' => time()
+            ]);
+            exit;
+        }
         // For deposits/credits, we need to debit the account
         $updateStmt = $pdo->prepare("UPDATE accounts SET balance = balance - ?, updated_at = NOW() WHERE account_id = ?");
         $updateStmt->execute([$original['amount'], $original['account_id']]);
@@ -245,10 +266,11 @@ try {
     error_log("ZURUBANK REVERSE Trace: " . $e->getTraceAsString());
     error_log("ZURUBANK REVERSE Input: " . json_encode($data ?? []));
     
-    http_response_code(500);
+    // The held-money CHECK is a refusal, not a server fault.
+    http_response_code(hold_is_held_money_refusal($e) ? 409 : 500);
     echo json_encode([
         'status' => 'error',
-        'message' => 'Reversal failed: ' . $e->getMessage(),
+        'message' => 'Reversal failed: ' . hold_refusal_message($e),
         'timestamp' => time()
     ]);
 }

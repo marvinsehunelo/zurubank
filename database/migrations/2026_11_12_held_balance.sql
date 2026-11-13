@@ -24,6 +24,11 @@
 
 BEGIN;
 
+-- If another session holds accounts or financial_holds for longer than this
+-- (a long report, a stuck transaction), stop and change nothing rather than
+-- make every request queue behind this script. Just run it again.
+SET LOCAL lock_timeout = '15s';
+
 -- Same definition hold.php creates on first use, in case no hold was ever placed.
 CREATE TABLE IF NOT EXISTS financial_holds (
     id BIGSERIAL PRIMARY KEY,

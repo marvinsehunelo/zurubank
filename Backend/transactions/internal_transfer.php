@@ -1,6 +1,7 @@
 <?php
 header("Content-Type: application/json");
 require_once __DIR__ . "/../config/db.php";
+require_once __DIR__ . '/../lib/account_holds.php';
 
 try {
     // ------------------ TOKEN HANDLING ------------------
@@ -82,6 +83,6 @@ try {
     if ($pdo->inTransaction()) $pdo->rollBack();
     echo json_encode([
         "status" => "error",
-        "message" => $e->getMessage()
+        "message" => hold_refusal_message($e)
     ]);
 }

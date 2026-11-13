@@ -618,6 +618,7 @@ try {
             $pdo->exec("
                 CREATE TABLE IF NOT EXISTS financial_holds (
                     id BIGSERIAL PRIMARY KEY,
+                    account_id BIGINT,
                     wallet_id BIGINT,
                     amount DECIMAL(20,4) NOT NULL,
                     hold_reference VARCHAR(100) UNIQUE NOT NULL,
@@ -628,7 +629,8 @@ try {
                     debited_at TIMESTAMP,
                     released_at TIMESTAMP,
                     created_at TIMESTAMP DEFAULT NOW(),
-                    updated_at TIMESTAMP DEFAULT NOW()
+                    updated_at TIMESTAMP DEFAULT NOW(),
+                    in_held_balance BOOLEAN NOT NULL DEFAULT FALSE
                 )
             ");
 

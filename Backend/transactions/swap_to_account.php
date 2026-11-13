@@ -7,6 +7,7 @@ ini_set('display_errors', '0');
 
 header("Content-Type: application/json; charset=utf-8");
 require_once __DIR__ . "/../config/db.php";
+require_once __DIR__ . '/../lib/account_holds.php';
 
 /**
  * Sends a structured JSON response and terminates the script.
@@ -181,5 +182,5 @@ try {
 } catch (Exception $e) {
     if (isset($pdo) && $pdo->inTransaction()) $pdo->rollBack();
     
-    jsonResponse("error", $e->getMessage());
+    jsonResponse("error", hold_refusal_message($e));
 }

@@ -12,6 +12,11 @@
 
 BEGIN;
 
+-- If another session holds accounts or financial_holds for longer than this
+-- (a long report, a stuck transaction), stop and change nothing rather than
+-- make every request queue behind this script. Just run it again.
+SET LOCAL lock_timeout = '15s';
+
 LOCK TABLE accounts, financial_holds IN SHARE ROW EXCLUSIVE MODE;
 
 CREATE TEMP TABLE _held_rollback_before ON COMMIT DROP AS
