@@ -38,6 +38,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 
 require_once __DIR__ . '/../../../helpers/CertificateManager.php';
 require_once __DIR__ . '/../../../helpers/crypto.php';
+require_once __DIR__ . '/../../../lib/held_balance_schema.php';
 
 /** One place to answer, so every exit has the same shape. */
 function respond(int $status, array $body): void
@@ -296,6 +297,14 @@ try {
     // ACCOUNT
     // ------------------------------------------------------------
     if ($balance === null && !$isVoucher) {
+        // held_balance is needed to tell what can be spent; the first
+        // request after the deploy applies it (lib/held_balance_schema.php).
+        if (!held_balance_ready($pdo)) {
+            respond(503, [
+                'status'  => 'error',
+                'message' => HELD_BALANCE_UNAVAILABLE,
+            ]);
+        }
         $stmt = $pdo->prepare("
             SELECT
                 account_id, user_id, account_number, account_type,

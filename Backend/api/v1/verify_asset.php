@@ -7,6 +7,7 @@
 
 require_once __DIR__ . '/../../config/db.php';
 require_once __DIR__ . '/../../helpers/crypto.php';
+require_once __DIR__ . '/../../lib/held_balance_schema.php';
 
 header("Content-Type: application/json");
 
@@ -202,6 +203,11 @@ try {
         
         if (empty($accountNumber)) {
             throw new Exception("Account number required for ACCOUNT asset type");
+        }
+        // held_balance is needed to tell what can be spent; the first
+        // request after the deploy applies it (lib/held_balance_schema.php).
+        if (!held_balance_ready($pdo)) {
+            throw new Exception(HELD_BALANCE_UNAVAILABLE);
         }
 
         $stmt = $pdo->prepare("

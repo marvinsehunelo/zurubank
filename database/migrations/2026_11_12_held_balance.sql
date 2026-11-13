@@ -18,6 +18,8 @@
 -- run converts nothing (or only holds the old code placed in the meantime).
 -- Wallet and voucher holds are not touched.
 --
+-- The code applies this file itself the first time it needs it
+-- (Backend/lib/held_balance_schema.php), so merging is enough. By hand:
 -- Run:     psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f database/migrations/2026_11_12_held_balance.sql
 -- Verify:  psql "$DATABASE_URL" -f database/migrations/2026_11_12_held_balance_verify.sql
 -- Steps and order with the code deploy: docs/HELD_BALANCE.md

@@ -33,6 +33,8 @@ require_once __DIR__ . '/../../../config/db.php';
 require_once __DIR__ . '/../../../helpers/crypto.php';
 require_once __DIR__ . '/../../../helpers/CertificateManager.php';
 require_once __DIR__ . '/../../../lib/account_holds.php';
+require_once __DIR__ . '/../../../lib/held_balance_schema.php';
+require_once __DIR__ . '/../../../lib/audit_log.php';
 
 $input = json_decode(file_get_contents('php://input'), true);
 
@@ -108,13 +110,19 @@ if (!$holdReference || !$amount) {
 }
 
 try {
+    // Account holds need the held-balance schema; the first request after
+    // the deploy applies it (Backend/lib/held_balance_schema.php). Voucher
+    // debits do not need it and keep working if it cannot be applied.
+    $heldBalanceReady = held_balance_ready($pdo);
+
     $pdo->beginTransaction();
 
     // ============================================================
     // BRANCH 1: Try to find as ACCOUNT hold first
+    // (in_held_balance is read by account_hold_debit(), only on this path)
     // ============================================================
     $stmt = $pdo->prepare("
-        SELECT id, account_id, amount, status, in_held_balance
+        SELECT id, account_id, amount, status
         FROM financial_holds
         WHERE hold_reference = :hold_reference
         AND status = 'HELD'
@@ -134,6 +142,10 @@ try {
         // so for that one nothing moves here.
         // ============================================================
         error_log("ZURUBANK NOTIFY_DEBIT: Found ACCOUNT hold ID={$accountHold['id']}, account_id={$accountHold['account_id']}");
+
+        if (!$heldBalanceReady) {
+            throw new Exception(HELD_BALANCE_UNAVAILABLE);
+        }
 
         if (abs(floatval($accountHold['amount']) - floatval($amount)) > 0.01) {
             throw new Exception("Amount mismatch. Hold: {$accountHold['amount']}, Requested: $amount");
@@ -189,27 +201,16 @@ try {
             error_log("ZURUBANK NOTIFY_DEBIT: Identity-swap settlement leg recorded for hold_reference={$holdReference}, amount={$amount}, counterparty={$counterpartyBank}");
         }
 
-        // Record in audit
-        $ipAddress = $_SERVER['REMOTE_ADDR'] ?? $_SERVER['HTTP_X_FORWARDED_FOR'] ?? null;
-        $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? null;
-        
-        $stmt = $pdo->prepare("
-            INSERT INTO audit_logs 
-            (entity, entity_id, action, category, severity, 
-             old_value, new_value, performed_by, performed_at,
-             ip_address, user_agent)
-            VALUES 
-            ('financial_holds', :entity_id, 'DEBIT', 'financial', 'info',
-             :old_value, :new_value, :performed_by, NOW(),
-             :ip_address, :user_agent)
-        ");
-        $stmt->execute([
+        // Record in audit. Never able to undo the debit: see Backend/lib/audit_log.php.
+        audit_log_write($pdo, [
+            'entity' => 'financial_holds',
             'entity_id' => $accountHold['id'],
+            'action' => 'DEBIT',
             'performed_by' => $requester,
-            'old_value' => json_encode(['status' => 'HELD', 'amount' => $accountHold['amount']]),
-            'new_value' => json_encode(['status' => 'DEBITED', 'amount' => $amount, 'signature_verified' => $isValid]),
-            'ip_address' => $ipAddress,
-            'user_agent' => $userAgent
+            'old_value' => ['status' => 'HELD', 'amount' => $accountHold['amount']],
+            'new_value' => ['status' => 'DEBITED', 'amount' => $amount, 'signature_verified' => $isValid],
+            'ip_address' => $_SERVER['REMOTE_ADDR'] ?? $_SERVER['HTTP_X_FORWARDED_FOR'] ?? null,
+            'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
         ]);
 
         $pdo->commit();
@@ -434,27 +435,16 @@ $stmt->execute([
     'description' => (string)"Voucher {$voucher['voucher_number']} settlement (authorized by {$requester})"
 ]);
 
-    // Log in audit with signature info
-    $ipAddress = $_SERVER['REMOTE_ADDR'] ?? $_SERVER['HTTP_X_FORWARDED_FOR'] ?? null;
-    $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? null;
-    
-    $stmt = $pdo->prepare("
-        INSERT INTO audit_logs 
-        (entity, entity_id, action, category, severity, 
-         old_value, new_value, performed_by, performed_at,
-         ip_address, user_agent)
-        VALUES 
-        ('instant_money_vouchers', :entity_id, 'DEBIT', 'financial', 'info',
-         :old_value, :new_value, :performed_by, NOW(),
-         :ip_address, :user_agent)
-    ");
-    $stmt->execute([
+    // Log in audit with signature info. Never able to undo the debit.
+    audit_log_write($pdo, [
+        'entity' => 'instant_money_vouchers',
         'entity_id' => $voucher['voucher_id'],
+        'action' => 'DEBIT',
         'performed_by' => $requester,
-        'old_value' => json_encode(['status' => $voucher['status'], 'amount' => $voucher['amount']]),
-        'new_value' => json_encode(['status' => 'redeemed', 'amount' => $amount, 'signature_verified' => $isValid]),
-        'ip_address' => $ipAddress,
-        'user_agent' => $userAgent
+        'old_value' => ['status' => $voucher['status'], 'amount' => $voucher['amount']],
+        'new_value' => ['status' => 'redeemed', 'amount' => $amount, 'signature_verified' => $isValid],
+        'ip_address' => $_SERVER['REMOTE_ADDR'] ?? $_SERVER['HTTP_X_FORWARDED_FOR'] ?? null,
+        'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
     ]);
 
     $pdo->commit();

@@ -27,7 +27,7 @@ try {
 
 // Fetch user accounts
 try {
-    $stmt = $pdo->prepare("SELECT account_id, account_number, account_type, balance, held_balance FROM accounts WHERE user_id = ?");
+    $stmt = $pdo->prepare("SELECT * FROM accounts WHERE user_id = ?"); // held_balance may not exist yet (see docs/HELD_BALANCE.md)
     $stmt->execute([$user_id]);
     $accounts = $stmt->fetchAll(PDO::FETCH_ASSOC);
 

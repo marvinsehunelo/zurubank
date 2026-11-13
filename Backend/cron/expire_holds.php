@@ -23,6 +23,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../lib/hold_release.php';
+require_once __DIR__ . '/../lib/held_balance_schema.php';
 
 const JOB        = 'expire_holds';
 const BATCH_SIZE = 200;
@@ -50,6 +51,12 @@ if (!$lock->fetchColumn()) {
 }
 
 try {
+    // The held-balance schema must be in place before any hold is expired.
+    // TRUE: also convert holds the old code placed while the deploy was
+    // switching over (one cheap query when there are none). If the schema
+    // cannot be applied, this run fails closed (logged) and retries next time.
+    held_balance_ensure($pdo, true);
+
     // ---------------------------------------------------------------
     // 1. financial_holds past expiry
     // ---------------------------------------------------------------

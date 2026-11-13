@@ -24,6 +24,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../lib/hold_release.php';
+require_once __DIR__ . '/../lib/held_balance_schema.php';
 
 const JOB        = 'expire_codes';
 const BATCH_SIZE = 200;
@@ -53,6 +54,10 @@ if (!$lock->fetchColumn()) {
 }
 
 try {
+    // The held-balance schema must be in place before releasing any hold.
+    // If it cannot be applied this run fails closed (logged) and retries next time.
+    held_balance_ensure($pdo);
+
     while (true) {
         $pdo->beginTransaction();
 

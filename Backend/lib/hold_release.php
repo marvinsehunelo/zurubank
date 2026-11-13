@@ -191,7 +191,32 @@ function expire_codes_for_hold(PDO $pdo, ?string $holdReference, string $reason)
     return $n;
 }
 
+/**
+ * Audit row for a release. It is written inside the release's transaction,
+ * so it runs in a savepoint: a failed log write is logged and never undoes
+ * the release itself.
+ */
 function log_release(PDO $pdo, array $r): void
+{
+    $inTx = $pdo->inTransaction();
+    try {
+        if ($inTx) {
+            $pdo->exec('SAVEPOINT log_release');
+        }
+        log_release_insert($pdo, $r);
+        if ($inTx) {
+            $pdo->exec('RELEASE SAVEPOINT log_release');
+        }
+    } catch (Throwable $e) {
+        if ($inTx) {
+            try { $pdo->exec('ROLLBACK TO SAVEPOINT log_release'); } catch (Throwable $ignore) {}
+        }
+        error_log('HOLD_RELEASE: hold_release_log row not written for ' . ($r['hold_reference'] ?? '?')
+            . ' (the release stands): ' . substr(preg_replace('/\s+/', ' ', $e->getMessage()), 0, 300));
+    }
+}
+
+function log_release_insert(PDO $pdo, array $r): void
 {
     $stmt = $pdo->prepare("
         INSERT INTO hold_release_log
@@ -219,6 +244,15 @@ function log_release(PDO $pdo, array $r): void
 }
 
 function log_cron_run(PDO $pdo, string $job, float $startedAt, int $processed, int $failed, string $detail = ''): void
+{
+    try {
+        log_cron_run_insert($pdo, $job, $startedAt, $processed, $failed, $detail);
+    } catch (Throwable $e) {
+        error_log("[{$job}] cron_runs row not written: " . substr(preg_replace('/\s+/', ' ', $e->getMessage()), 0, 300));
+    }
+}
+
+function log_cron_run_insert(PDO $pdo, string $job, float $startedAt, int $processed, int $failed, string $detail): void
 {
     $stmt = $pdo->prepare("
         INSERT INTO cron_runs (job, started_at, processed, failed, detail)

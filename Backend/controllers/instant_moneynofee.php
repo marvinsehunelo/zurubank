@@ -44,7 +44,7 @@ try {
             $sender_phone = $sender['phone'];
 
             // Check balance
-            $stmt = $pdo->prepare("SELECT balance, held_balance FROM accounts WHERE account_id=? AND user_id=?");
+            $stmt = $pdo->prepare("SELECT * FROM accounts WHERE account_id=? AND user_id=?"); // held_balance may not exist yet
             $stmt->execute([$from_account_id, $user_id]);
             $acc = $stmt->fetch(PDO::FETCH_ASSOC);
             if (!$acc) throw new Exception("Account not found");

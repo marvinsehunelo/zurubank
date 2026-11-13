@@ -9,6 +9,7 @@ require_once __DIR__ . '/../../config/db.php';
 require_once __DIR__ . '/../../helpers/crypto.php';
 require_once __DIR__ . '/../../helpers/CertificateManager.php';
 require_once __DIR__ . '/../../lib/account_holds.php';
+require_once __DIR__ . '/../../lib/held_balance_schema.php';
 
 header('Content-Type: application/json');
 
@@ -218,6 +219,11 @@ try {
         throw new Exception("Valid amount required");
     }
 
+    // Account (and card) holds need the held-balance schema; the first
+    // request after the deploy applies it (Backend/lib/held_balance_schema.php).
+    // Voucher and wallet holds do not need it and keep working without it.
+    $heldBalanceReady = ($assetType === 'ACCOUNT') ? held_balance_ready($pdo) : true;
+
     // Start transaction
     $pdo->beginTransaction();
 
@@ -349,6 +355,9 @@ try {
     // ACCOUNT HANDLING (also handles resolved CARD requests)
     // ============================================================
     } elseif ($assetType === 'ACCOUNT') {
+        if (!$heldBalanceReady) {
+            throw new Exception(HELD_BALANCE_UNAVAILABLE);
+        }
         if (!$accountNumber) {
             throw new Exception("Account number required");
         }
