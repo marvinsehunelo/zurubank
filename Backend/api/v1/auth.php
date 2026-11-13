@@ -165,13 +165,11 @@ function log_auth_attempt($api_key, $success, $source = null) {
     }
 }
 
-function generate_trace() {
-    return 'TXN' . time() . rand(1000, 9999);
-}
-
-function generate_auth_code() {
-    return 'AUTH' . rand(100000, 999999);
-}
+// generate_trace() and generate_auth_code() live in helpers/crypto.php. The
+// copies that were here clashed with those ("Cannot redeclare"), so every
+// script loading both files died. No caller used these copies: the only
+// callers (network/acquirer_confirm.php, network/issuer_finalize.php) load
+// crypto.php alone, so its formats are the ones already stored and sent.
 
 function generate_voucher_token() {
     return str_pad(rand(0, 99999999), 8, '0', STR_PAD_LEFT);
