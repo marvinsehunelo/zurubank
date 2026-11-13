@@ -26,7 +26,7 @@ PGBIN="${PGBIN:-$(ls -d /usr/lib/postgresql/16/bin 2>/dev/null || true)}"
 WORK="$(mktemp -d)"
 chmod 755 "$WORK"
 PGPORT_T=$(( 20000 + RANDOM % 20000 ))
-WEBPORT=$(( 40001 + RANDOM % 20000 ))
+WEBPORT=$(( 40001 + RANDOM % 20000 ))  # this one and the next three
 DB=zuru_hold_test
 
 # PostgreSQL will not run as root; use the postgres user when we are root.
@@ -63,10 +63,6 @@ chmod 600 "$WORK/pgdata/server.key"
 as_pg "$PGBIN/pg_ctl" -D "$WORK/pgdata" -l "$WORK/pg.log" -w \
     -o "-p $PGPORT_T -c listen_addresses=127.0.0.1 -c unix_socket_directories=$WORK -c ssl=on -c timezone=UTC" start >/dev/null
 PSQL=("$PGBIN/psql" -X -q -h 127.0.0.1 -p "$PGPORT_T" -U postgres -v ON_ERROR_STOP=1)
-"${PSQL[@]}" -d postgres -c "CREATE DATABASE $DB"
-"${PSQL[@]}" -d "$DB" -f "$ROOT/tests/fixtures/hold_flow_schema.sql"
-
-export DATABASE_URL="postgresql://postgres:unused@127.0.0.1:$PGPORT_T/$DB"
 export PGTZ=UTC
 export VOUCHMORPH_CA_CERT_CONTENT="$(cat "$C/ca.crt")"
 export ZURUBANK_PRIVATE_KEY_CONTENT="$(cat "$C/ZURUBANK.key")"
@@ -75,37 +71,52 @@ export VOUCHMORPH_PRIVATE_KEY_CONTENT="$(cat "$C/VOUCHMORPH.key")"
 export VOUCHMORPH_CERT_CONTENT="$(cat "$C/VOUCHMORPH.crt")"
 export ZURUBANK_API_KEY="test-only-not-a-real-key"
 
-# Two separate server processes: the check for two holds at the same moment
-# sends one request to each, so both really run at once (one built-in server
-# process runs one request at a time, even with PHP_CLI_SERVER_WORKERS).
-WEBPORT2=$(( WEBPORT + 1 ))
+# Two separate server processes per phase: the checks for two requests at
+# the same moment send one to each, so both really run at once (one built-in
+# server process runs one request at a time, even with PHP_CLI_SERVER_WORKERS).
 start_web() {
-    ( cd "$ROOT" && exec php -d error_log="$WORK/php-error.log" -d log_errors=1 -d display_errors=0 \
+    ( cd "$ROOT" && exec php -d error_log="$HOLD_TEST_ERROR_LOG" -d log_errors=1 -d display_errors=0 \
         -S "127.0.0.1:$1" -t . router.php >"$WORK/php-server-$1.log" 2>&1 ) &
 }
-echo "== PHP built-in servers on 127.0.0.1:$WEBPORT and :$WEBPORT2"
-start_web "$WEBPORT";  WEBPID=$!
-start_web "$WEBPORT2"; WEBPID2=$!
-for port in "$WEBPORT" "$WEBPORT2"; do
-    for _ in $(seq 1 50); do
-        curl -s -o /dev/null "http://127.0.0.1:$port/" && break
-        sleep 0.1
-    done
-done
 
-export HOLD_TEST_BASE_URL="http://127.0.0.1:$WEBPORT"
-export HOLD_TEST_BASE_URL_2="http://127.0.0.1:$WEBPORT2"
 export HOLD_TEST_PSQL_BIN="$PGBIN/psql"
 export HOLD_TEST_PGPORT="$PGPORT_T"
-export HOLD_TEST_DB="$DB"
 export HOLD_TEST_THROWAWAY=1
-export HOLD_TEST_ERROR_LOG="$WORK/php-error.log"
 
-set +e
-php -d error_log="$WORK/php-error.log" -d log_errors=1 "$ROOT/tests/hold_flow_pg_test.php"
-RC=$?
-set -e
-if [ "$RC" != "0" ] && [ -n "${HOLD_TEST_SHOW_LOG:-}" ]; then
-    echo "---- last lines of the PHP error log ----"; tail -n 40 "$WORK/php-error.log" || true
-fi
+# Each phase gets its own database, created from the OLD-shape fixture, its
+# own servers and its own log:
+#   manual  the SQL files run by hand (migration, verify, rollback), then every flow;
+#   auto    nobody runs SQL: the first requests migrate it, then every flow.
+run_phase() {
+    local mode="$1" db="$2" port="$3"
+    echo; echo "======== phase: $mode (database $db)"
+    "${PSQL[@]}" -d postgres -c "CREATE DATABASE $db"
+    "${PSQL[@]}" -d "$db" -f "$ROOT/tests/fixtures/hold_flow_schema.sql"
+    export DATABASE_URL="postgresql://postgres:unused@127.0.0.1:$PGPORT_T/$db"
+    export HOLD_TEST_DB="$db" HOLD_TEST_MODE="$mode"
+    export HOLD_TEST_ERROR_LOG="$WORK/php-error-$mode.log"
+    export HOLD_TEST_BASE_URL="http://127.0.0.1:$port" HOLD_TEST_BASE_URL_2="http://127.0.0.1:$((port + 1))"
+    start_web "$port";           WEBPID=$!
+    start_web "$((port + 1))";   WEBPID2=$!
+    for p in "$port" "$((port + 1))"; do
+        for _ in $(seq 1 50); do curl -s -o /dev/null "http://127.0.0.1:$p/" && break; sleep 0.1; done
+    done
+    set +e
+    php -d error_log="$HOLD_TEST_ERROR_LOG" -d log_errors=1 "$ROOT/tests/hold_flow_pg_test.php"
+    local rc=$?
+    set -e
+    kill "$WEBPID" "$WEBPID2" 2>/dev/null || true
+    wait "$WEBPID" "$WEBPID2" 2>/dev/null || true
+    WEBPID=; WEBPID2=
+    if [ "$rc" != "0" ] && [ -n "${HOLD_TEST_SHOW_LOG:-}" ]; then
+        echo "---- last lines of the PHP error log ($mode) ----"; tail -n 40 "$HOLD_TEST_ERROR_LOG" || true
+    fi
+    return "$rc"
+}
+
+RC=0
+run_phase manual "${DB}_manual" "$WEBPORT"       || RC=1
+run_phase auto   "${DB}_auto"   "$((WEBPORT + 2))" || RC=1
+echo
+[ "$RC" = "0" ] && echo "== both phases passed" || echo "== a phase FAILED"
 exit "$RC"
