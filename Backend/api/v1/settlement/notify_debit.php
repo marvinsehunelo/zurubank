@@ -35,11 +35,12 @@ require_once __DIR__ . '/../../../helpers/CertificateManager.php';
 require_once __DIR__ . '/../../../lib/account_holds.php';
 require_once __DIR__ . '/../../../lib/held_balance_schema.php';
 require_once __DIR__ . '/../../../lib/audit_log.php';
+require_once __DIR__ . '/../../../lib/request_log.php';
 
 $input = json_decode(file_get_contents('php://input'), true);
 
-// Log incoming for debugging
-error_log("ZURUBANK notify_debit.php received: " . json_encode($input));
+// Only the shape of the body is logged: it carries a certificate and a signature.
+error_log("ZURUBANK notify_debit.php received: " . request_shape_for_log($input));
 
 // ============================================================
 // CERTIFICATE-BASED VERIFICATION (REQUIRED)
@@ -302,7 +303,8 @@ try {
             LIMIT 5
         ");
         $availableVouchers = $checkStmt->fetchAll(PDO::FETCH_ASSOC);
-        error_log("ZURUBANK NOTIFY_DEBIT: Available vouchers: " . json_encode($availableVouchers));
+        // How many, not which: other customers' voucher numbers stay out of the log.
+        error_log("ZURUBANK NOTIFY_DEBIT: " . count($availableVouchers) . " voucher(s) on hold or active were looked at");
         
         throw new Exception("Voucher not found for hold reference: $holdReference");
     }
@@ -486,7 +488,7 @@ $stmt->execute([
     }
     error_log("ZURUBANK NOTIFY_DEBIT ERROR: " . $e->getMessage());
     error_log("ZURUBANK NOTIFY_DEBIT Trace: " . $e->getTraceAsString());
-    error_log("ZURUBANK NOTIFY_DEBIT Input: " . json_encode($input ?? []));
+    error_log("ZURUBANK NOTIFY_DEBIT Input: " . request_shape_for_log($input ?? null));
     
     // Return error with timestamp
     echo json_encode([

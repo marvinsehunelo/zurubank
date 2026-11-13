@@ -821,6 +821,11 @@ check('...and it is logged', log_count('[audit_log] audit row not written for fi
 $pdo->exec("DROP TABLE audit_logs");
 $pdo->exec("ALTER TABLE audit_logs_fixture RENAME TO audit_logs");
 
+// A request's secrets must not reach the log, whatever the request's outcome.
+$r = hold_request(['action' => 'PLACE_HOLD', 'asset_type' => 'ACCOUNT', 'account_number' => 'TEST-NO-SUCH-ACCOUNT',
+    'reference' => 'TEST-LOG-1', 'amount' => 5, 'pin' => '918273']);
+check('a hold on an account that does not exist is refused', ($r['hold_placed'] ?? null) !== true, $r);
+
 section('C. afterwards');
 [$rc, $out] = psql_file($VERIFY);
 check('verify returns no rows after every flow', $rc === 0 && trim($out) === '', $out);
@@ -828,6 +833,9 @@ $log = $ERRLOG !== '' && is_file($ERRLOG) ? (string)file_get_contents($ERRLOG) :
 preg_match_all('/PHP (Fatal error|Warning|Notice|Deprecated|Parse error):.*/', $log, $m);
 check('no PHP errors, warnings or notices in the server log', $m[0] === [], array_slice(array_unique($m[0]), 0, 10));
 check('no key material in the log', strpos($log, 'PRIVATE KEY') === false && strpos($log, 'first 50 chars') === false);
+preg_match_all('/^.*(918273|BEGIN CERTIFICATE).*$/m', $log, $leaks);
+check('no PIN or certificate from a request in the log', $leaks[0] === [],
+    array_slice(array_unique(array_map(static fn($line) => substr($line, 0, 110), $leaks[0])), 0, 5));
 
 echo "\n[{$MODE}] " . ($FAIL === 0 ? "All {$PASS} passed.\n" : "{$FAIL} FAILED, {$PASS} passed.\n");
 exit($FAIL === 0 ? 0 : 1);

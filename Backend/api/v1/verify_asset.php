@@ -8,6 +8,7 @@
 require_once __DIR__ . '/../../config/db.php';
 require_once __DIR__ . '/../../helpers/crypto.php';
 require_once __DIR__ . '/../../lib/held_balance_schema.php';
+require_once __DIR__ . '/../../lib/request_log.php';
 
 header("Content-Type: application/json");
 
@@ -26,7 +27,8 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 
 $input = json_decode(file_get_contents("php://input"), true);
 
-error_log("Parsed input: " . json_encode($input));
+// Only the shape of the body: it can carry a customer's PIN.
+error_log("Parsed input: " . request_shape_for_log($input));
 
 // ============================================================
 // FIX 1: Support destination_asset_type for account verification

@@ -162,8 +162,8 @@ class CertificateManager
         $jsonToVerify = json_encode($payloadToVerify, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         $decodedSig = base64_decode($signature);
         
-        // DEBUG: Log what's being verified
-        error_log("CertificateManager: VERIFYING JSON: " . $jsonToVerify);
+        // Only the size: the body can carry a customer's PIN and account details.
+        error_log("CertificateManager: verifying " . strlen((string)$jsonToVerify) . " bytes of signed JSON");
         
         // Step 4: Verify signature
         $keyResource = openssl_pkey_get_public($publicKey);
@@ -204,7 +204,8 @@ class CertificateManager
         openssl_sign($jsonToSign, $signature, $keyResource, OPENSSL_ALGO_SHA256);
         
         // DEBUG: Log what was signed
-        error_log("CertificateManager: SIGNING JSON: " . $jsonToSign);
+        // Only the size: what is signed can carry a customer's PIN and account details.
+        error_log("CertificateManager: signing " . strlen((string)$jsonToSign) . " bytes of JSON");
         
         return array_merge($payloadWithTimestamp, [
             'signature' => base64_encode($signature),

@@ -10,14 +10,16 @@ require_once __DIR__ . '/../../helpers/crypto.php';
 require_once __DIR__ . '/../../helpers/CertificateManager.php';
 require_once __DIR__ . '/../../lib/account_holds.php';
 require_once __DIR__ . '/../../lib/held_balance_schema.php';
+require_once __DIR__ . '/../../lib/request_log.php';
 
 header('Content-Type: application/json');
 
 try {
     $input = json_decode(file_get_contents('php://input'), true);
     
-    error_log("=== ZURUBANK hold.php received ===");
-    error_log(json_encode($input));
+    // Only the shape of the body: it carries a certificate and a signature,
+    // and for a voucher or wallet a customer's PIN.
+    error_log("=== ZURUBANK hold.php received === " . request_shape_for_log($input));
 
     // ============================================================
     // CERTIFICATE-BASED VERIFICATION (REQUIRED)
@@ -97,7 +99,7 @@ try {
     if (($assetType === 'VOUCHER' || $assetType === 'CASHOUT-VOUCHER') && empty($voucherNumber)) {
         if (!empty($accountNumber)) {
             $voucherNumber = trim($accountNumber);
-            error_log("ZURUBANK HOLD: Using source_identifier as voucher_number: $voucherNumber");
+            error_log("ZURUBANK HOLD: Using source_identifier as voucher_number: " . masked_for_log($voucherNumber));
         }
     }
     
@@ -107,7 +109,7 @@ try {
     if (empty($voucherNumber) && !empty($input['reference'])) {
         if (preg_match('/HOLD_(\d+)_/', $input['reference'], $matches)) {
             $voucherNumber = $matches[1];
-            error_log("ZURUBANK HOLD: Extracted voucher_number from reference: $voucherNumber");
+            error_log("ZURUBANK HOLD: Extracted voucher_number from reference: " . masked_for_log($voucherNumber));
         }
     }
     
@@ -119,7 +121,7 @@ try {
         foreach ($input as $key => $value) {
             if (is_string($value) && preg_match('/^\d+$/', $value) && strlen($value) >= 6) {
                 $voucherNumber = trim($value);
-                error_log("ZURUBANK HOLD: Auto-detected voucher_number from field '$key': $voucherNumber");
+                error_log("ZURUBANK HOLD: Auto-detected voucher_number from field '$key': " . masked_for_log($voucherNumber));
                 break;
             }
         }
@@ -206,7 +208,7 @@ try {
         throw new Exception("Hold reference is required");
     }
     
-    error_log("ZURUBANK HOLD: Action: $action, AssetType: $assetType, HoldRef: $holdReference, Amount: $amount, VoucherNum: $voucherNumber");
+    error_log("ZURUBANK HOLD: Action: $action, AssetType: $assetType, HoldRef: $holdReference, Amount: $amount, VoucherNum: " . masked_for_log($voucherNumber));
 
     // RELEASE_HOLD releases by hold_reference lookup - it doesn't need a
     // fresh amount supplied by the caller (there's nothing to supply; the
@@ -271,16 +273,16 @@ try {
         }
 
         if (!$voucher) {
-            error_log("ZURUBANK HOLD: Voucher not found: $voucherNumber");
+            error_log("ZURUBANK HOLD: Voucher not found: " . masked_for_log($voucherNumber));
             throw new Exception("Voucher not found: $voucherNumber");
         }
 
         if ($voucherPin && isset($voucher['voucher_pin'])) {
             if ($voucher['voucher_pin'] !== $voucherPin) {
-                error_log("ZURUBANK HOLD: Invalid PIN for voucher $voucherNumber");
+                error_log("ZURUBANK HOLD: Invalid PIN for voucher " . masked_for_log($voucherNumber));
                 throw new Exception("Invalid voucher PIN");
             }
-            error_log("ZURUBANK HOLD: PIN verified for voucher $voucherNumber");
+            error_log("ZURUBANK HOLD: PIN verified for voucher " . masked_for_log($voucherNumber));
         }
 
         if (in_array($action, ['HOLD', 'PLACE', 'PLACE_HOLD'])) {

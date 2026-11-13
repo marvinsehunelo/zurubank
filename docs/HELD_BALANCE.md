@@ -266,5 +266,13 @@ does not know about. So pause VouchMorph traffic if you can, then:
   certificate) calls a `verify_signature()` that exists nowhere. It now
   reports the query as unverified instead of dying. Verification is optional
   for status queries.
-- `hold.php` logs every request body, which includes a voucher PIN when one
-  is sent.
+
+## What the log may hold
+
+`hold.php`, `notify_debit.php`, `verify_asset.php` and the certificate helper
+used to write whole request bodies to the log: the caller's certificate and
+signature, and a customer's PIN when a voucher or wallet was held. They now
+log the action and the names of the fields only (`Backend/lib/request_log.php`),
+and a voucher number is written as its last four characters. The hold-flow
+test sends a made-up PIN and fails if it, or a certificate, appears in the
+server log.
